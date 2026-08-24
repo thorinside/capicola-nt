@@ -1,0 +1,13 @@
+diff --git a/SparseLine.h b/SparseLine.h
+--- a/SparseLine.h
++++ b/SparseLine.h
+@@ -85,4 +85,8 @@ public:
+     inline void Clear() {
+         writePos = 0;
+-        buffer.fill(Keyframe{0.0f, 1.0f});
++        // Resetting a live source must be constant-time. Entries beyond slot 0
++        // are outside the live [Oldest(), newest] range until Write() replaces
++        // them, so clearing the full ring only burns realtime DRAM bandwidth.
++        // Slot 0 is the sole readable sentinel while the ring is empty.
++        buffer[0] = Keyframe{0.0f, 1.0f};
+     }

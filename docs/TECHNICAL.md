@@ -32,6 +32,16 @@ stream. Both channels render to private scratch buffers before Add/Replace
 audio output writes. Four optional analysis signals replace their selected CV
 buses and default to `None`.
 
+All persistent DSP, stream, and block buffers come from the memory supplied at
+construction; the audio path performs no heap allocation. Typed objects and
+scratch buffers are explicitly aligned within those byte allocations. Engine
+reset is constant-time with respect to the large sparse rings: it resets their
+live range and sentinel rather than clearing roughly half a megabyte of DRAM.
+The audio callback also performs no SD catalogue queries, parameter-definition
+updates, or stream opens. A missing source block or non-finite DSP result ramps
+the last valid output to silence; catalogue refresh and sample recovery wait for
+a later parameter/UI event.
+
 The custom UI owns three pressable pots and two pressable encoders. Its MAIN/ALT
 performance hierarchy and temporary folder/sample selector are documented in
 the [user guide](../README.md). All twelve continuous processing controls remain

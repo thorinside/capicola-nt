@@ -3,7 +3,12 @@ ARM_CXX ?= arm-none-eabi-c++
 AUDIT_TEST_DIR ?= /tmp/capicola-audit-tests
 BUILD_DIR ?= build
 PLUGIN := $(BUILD_DIR)/plugins/capicola.o
-COMMON_INCLUDES := -Iinclude -Ivendor/capicola/lib
+CAPICOLA_SOURCE_DIR := vendor/capicola/lib
+CAPICOLA_OVERLAY := $(BUILD_DIR)/capicola-overlay
+CAPICOLA_OVERLAY_STAMP := $(CAPICOLA_OVERLAY)/.prepared
+CAPICOLA_PATCHES := $(wildcard patches/capicola/*.patch)
+CAPICOLA_HEADERS := $(wildcard $(CAPICOLA_SOURCE_DIR)/*.h)
+COMMON_INCLUDES := -Iinclude -I$(CAPICOLA_OVERLAY)
 
 .PHONY: all clean verify verify-audit verify-license test-upstream test-live plugin inspect-plugin source-package release-assets
 
@@ -25,7 +30,7 @@ test-upstream:
 		-o "$(AUDIT_TEST_DIR)/capicola_tests"
 	"$(AUDIT_TEST_DIR)/capicola_tests"
 
-test-live:
+test-live: $(CAPICOLA_OVERLAY_STAMP)
 	mkdir -p "$(AUDIT_TEST_DIR)"
 	$(CXX) -std=c++17 -O2 -Wall -Wextra -Werror \
 		$(COMMON_INCLUDES) tests/live_path_tests.cpp \
@@ -39,11 +44,16 @@ test-live:
 
 plugin: $(PLUGIN)
 
-$(PLUGIN): src/capicola_nt.cpp include/capicola_nt/live_path.h
+$(CAPICOLA_OVERLAY_STAMP): tools/prepare_capicola_overlay.sh $(CAPICOLA_PATCHES) $(CAPICOLA_HEADERS)
+	sh tools/prepare_capicola_overlay.sh \
+		"$(CAPICOLA_SOURCE_DIR)" "$(CAPICOLA_OVERLAY)" "patches/capicola"
+
+$(PLUGIN): src/capicola_nt.cpp include/capicola_nt/live_path.h \
+		include/capicola_nt/int64_to_double.h $(CAPICOLA_OVERLAY_STAMP)
 	mkdir -p "$(@D)"
 	$(ARM_CXX) -std=gnu++17 -mcpu=cortex-m7 -mfpu=fpv5-d16 \
 		-mfloat-abi=hard -mthumb -fno-rtti -fno-exceptions -Os -fPIC \
-		-ffunction-sections -fdata-sections -Wall -Wextra -Werror \
+		-Wall -Wextra -Werror \
 		-Ivendor/distingNT_API/include $(COMMON_INCLUDES) -c -o "$@" $<
 
 inspect-plugin: $(PLUGIN)
@@ -52,6 +62,7 @@ inspect-plugin: $(PLUGIN)
 	arm-none-eabi-readelf -h "$(PLUGIN)" | grep -q 'Type:[[:space:]]*REL (Relocatable file)'
 	arm-none-eabi-readelf -h "$(PLUGIN)" | grep -q 'Machine:[[:space:]]*ARM'
 	arm-none-eabi-nm -g "$(PLUGIN)" | grep -q ' T pluginEntry$$'
+	python3 tools/verify_plugin_symbols.py "$(PLUGIN)"
 
 source-package: verify-license
 	python3 tools/build_source_archive.py

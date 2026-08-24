@@ -165,16 +165,38 @@ struct Algorithm : public _NT_algorithm {
     SourceMode activeSource;
     UiView uiView;
     bool alternateControls;
+    int16_t appliedControls[ARRAY_SIZE(kPerformanceParameters)];
+    bool processingControlsApplied;
+    bool processorFaulted;
+    float lastOutputLeft;
+    float lastOutputRight;
 };
 
 void calculateRequirements(_NT_algorithmRequirements& requirements,
                            const int32_t*) {
     requirements.numParameters = kNumParameters;
-    requirements.sram = sizeof(Algorithm);
-    requirements.dram = sizeof(SourceProcessor) + NT_globals.streamBufferSizeBytes +
+    requirements.sram = sizeof(Algorithm) + alignof(Algorithm) - 1U;
+    requirements.dram = alignof(SourceProcessor) - 1U +
+                        sizeof(SourceProcessor) +
+                        NT_globals.streamBufferSizeBytes +
+                        alignof(float) - 1U +
                         4U * NT_globals.maxFramesPerStep * sizeof(float);
-    requirements.dtc = NT_globals.streamSizeBytes;
+    requirements.dtc = NT_globals.streamSizeBytes + alignof(uint32_t) - 1U;
     requirements.itc = 0;
+}
+
+uint8_t* alignPointer(uint8_t* pointer, std::size_t alignment) {
+    const uintptr_t address = reinterpret_cast<uintptr_t>(pointer);
+    const uintptr_t mask = static_cast<uintptr_t>(alignment - 1U);
+    return reinterpret_cast<uint8_t*>((address + mask) & ~mask);
+}
+
+void resetProcessor(Algorithm* algorithm) {
+    algorithm->processor->init();
+    algorithm->processingControlsApplied = false;
+    algorithm->processorFaulted = false;
+    algorithm->lastOutputLeft = 0.0f;
+    algorithm->lastOutputRight = 0.0f;
 }
 
 _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& memory,
@@ -182,28 +204,46 @@ _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& memory,
                          const int32_t*) {
     static_assert(ARRAY_SIZE(kParameterTemplate) == kNumParameters);
 
-    Algorithm* algorithm = new (memory.sram) Algorithm();
+    Algorithm* algorithm = new (alignPointer(memory.sram, alignof(Algorithm)))
+        Algorithm();
     std::memcpy(algorithm->params, kParameterTemplate, sizeof(kParameterTemplate));
     algorithm->parameters = algorithm->params;
     algorithm->parameterPages = &kParameterPages;
 
-    algorithm->processor = new (memory.dram) SourceProcessor();
-    algorithm->processor->init();
-    uint8_t* cursor = memory.dram + sizeof(SourceProcessor);
+    uint8_t* cursor = alignPointer(memory.dram, alignof(SourceProcessor));
+    algorithm->processor = new (cursor) SourceProcessor();
+    resetProcessor(algorithm);
+    cursor += sizeof(SourceProcessor);
     algorithm->streamBuffer = cursor;
     cursor += NT_globals.streamBufferSizeBytes;
+    cursor = alignPointer(cursor, alignof(float));
     algorithm->scratchLeft = reinterpret_cast<float*>(cursor);
     algorithm->scratchRight = algorithm->scratchLeft + NT_globals.maxFramesPerStep;
     algorithm->sampleLeft = algorithm->scratchRight + NT_globals.maxFramesPerStep;
     algorithm->sampleRight = algorithm->sampleLeft + NT_globals.maxFramesPerStep;
 
-    algorithm->stream = memory.dtc;
+    algorithm->stream = alignPointer(memory.dtc, alignof(uint32_t));
     algorithm->sampleSpeed = 1.0f;
-    algorithm->cardMounted = false;
+    algorithm->cardMounted = NT_isSdCardMounted();
     algorithm->streamOpen = false;
     algorithm->activeSource = kSourceLive;
     algorithm->uiView = kUiPerformance;
     algorithm->alternateControls = false;
+
+    const uint32_t folderCount = algorithm->cardMounted
+        ? NT_getNumSampleFolders() : 0;
+    algorithm->params[kParamFolder].max = folderCount == 0
+        ? 0
+        : static_cast<int16_t>(folderCount - 1U > 32767U
+            ? 32767U : folderCount - 1U);
+    _NT_wavFolderInfo folderInfo{};
+    if (folderCount != 0) {
+        NT_getSampleFolderInfo(0, folderInfo);
+    }
+    algorithm->params[kParamSample].max = folderInfo.numSampleFiles == 0
+        ? 0
+        : static_cast<int16_t>(folderInfo.numSampleFiles - 1U > 32767U
+            ? 32767U : folderInfo.numSampleFiles - 1U);
     return algorithm;
 }
 
@@ -229,29 +269,70 @@ float exponentialSweep(float minimum, float maximum, int32_t value) {
 }
 
 void applyProcessingControls(Algorithm* algorithm) {
-    algorithm->processor->setPitchSemitones(
-        static_cast<float>(algorithm->v[kParamPitch]) * 0.1f);
-    algorithm->processor->setStretch(stretchValue(algorithm->v[kParamStretch]));
-    algorithm->processor->setTransientThreshold(
-        thresholdValue(algorithm->v[kParamThreshold]));
-    algorithm->processor->setGrainSize(algorithm->v[kParamGrainSize]);
-    algorithm->processor->setQuality(
-        0.1f - static_cast<float>(algorithm->v[kParamQuality]) * 0.00099f);
-    algorithm->processor->setFeedback(
-        static_cast<float>(algorithm->v[kParamFeedback]) * 0.01f);
-    algorithm->processor->setEnvelopeSmoothing(
-        exponentialSweep(5.0e-5f, 0.125f,
-                         algorithm->v[kParamEnvelopeSmoothing]));
-    algorithm->processor->setFade(
-        exponentialSweep(480.0f, 12000.0f, algorithm->v[kParamFade]));
-    algorithm->processor->setDrive(
-        0.5f + 3.5f * secondaryNorm(algorithm->v[kParamDrive]));
-    algorithm->processor->setDriveCharacter(
-        secondaryNorm(algorithm->v[kParamDriveCharacter]));
-    algorithm->processor->setMix(
-        static_cast<float>(algorithm->v[kParamMix]) * 0.01f);
-    algorithm->processor->setFeedbackTone(
-        exponentialSweep(2.0e-3f, 0.9f, algorithm->v[kParamFeedbackTone]));
+    for (std::size_t i = 0; i < ARRAY_SIZE(kPerformanceParameters); ++i) {
+        const int parameter = kPerformanceParameters[i];
+        if (algorithm->processingControlsApplied &&
+            algorithm->appliedControls[i] == algorithm->v[parameter]) {
+            continue;
+        }
+        switch (parameter) {
+            case kParamPitch:
+                algorithm->processor->setPitchSemitones(
+                    static_cast<float>(algorithm->v[parameter]) * 0.1f);
+                break;
+            case kParamStretch:
+                algorithm->processor->setStretch(
+                    stretchValue(algorithm->v[parameter]));
+                break;
+            case kParamThreshold:
+                algorithm->processor->setTransientThreshold(
+                    thresholdValue(algorithm->v[parameter]));
+                break;
+            case kParamGrainSize:
+                algorithm->processor->setGrainSize(algorithm->v[parameter]);
+                break;
+            case kParamQuality:
+                algorithm->processor->setQuality(
+                    0.1f - static_cast<float>(algorithm->v[parameter]) * 0.00099f);
+                break;
+            case kParamFeedback:
+                algorithm->processor->setFeedback(
+                    static_cast<float>(algorithm->v[parameter]) * 0.01f);
+                break;
+            case kParamEnvelopeSmoothing:
+                algorithm->processor->setEnvelopeSmoothing(
+                    exponentialSweep(5.0e-5f, 0.125f,
+                                     algorithm->v[parameter]));
+                break;
+            case kParamFade:
+                algorithm->processor->setFade(
+                    exponentialSweep(480.0f, 12000.0f,
+                                     algorithm->v[parameter]));
+                break;
+            case kParamDrive:
+                algorithm->processor->setDrive(
+                    0.5f + 3.5f * secondaryNorm(algorithm->v[parameter]));
+                break;
+            case kParamDriveCharacter:
+                algorithm->processor->setDriveCharacter(
+                    secondaryNorm(algorithm->v[parameter]));
+                break;
+            case kParamMix:
+                algorithm->processor->setMix(
+                    static_cast<float>(algorithm->v[parameter]) * 0.01f);
+                break;
+            case kParamFeedbackTone:
+                algorithm->processor->setFeedbackTone(
+                    exponentialSweep(2.0e-3f, 0.9f,
+                                     algorithm->v[parameter]));
+                break;
+            default:
+                break;
+        }
+        algorithm->appliedControls[i] =
+            algorithm->v[parameter];
+    }
+    algorithm->processingControlsApplied = true;
 }
 
 bool catalogIndex(int32_t value, uint32_t count, uint32_t& index) {
@@ -276,12 +357,37 @@ void updateSampleRange(Algorithm* algorithm) {
     NT_updateParameterDefinition(NT_algorithmIndex(algorithm), kParamSample);
 }
 
+// Catalogue discovery and parameter-definition updates may touch the SD card
+// and are not audio-rate work. Call this only from host/UI parameter callbacks,
+// never from step().
+void refreshCatalog(Algorithm* algorithm) {
+    const bool mounted = NT_isSdCardMounted();
+    if (mounted != algorithm->cardMounted) {
+        algorithm->cardMounted = mounted;
+        algorithm->streamOpen = false;
+        resetProcessor(algorithm);
+    }
+
+    const uint32_t folderCount = mounted ? NT_getNumSampleFolders() : 0;
+    algorithm->params[kParamFolder].max = folderCount == 0
+        ? 0
+        : static_cast<int16_t>(folderCount - 1U > 32767U
+            ? 32767U : folderCount - 1U);
+    NT_updateParameterDefinition(NT_algorithmIndex(algorithm), kParamFolder);
+    if (mounted) {
+        updateSampleRange(algorithm);
+    } else {
+        algorithm->params[kParamSample].max = 0;
+        NT_updateParameterDefinition(NT_algorithmIndex(algorithm), kParamSample);
+    }
+}
+
 void openSelectedSample(Algorithm* algorithm) {
     algorithm->streamOpen = false;
     if (algorithm->activeSource == kSourceSample) {
         // A new or failed selection replaces the previous sample immediately;
         // never render history retained from another file.
-        algorithm->processor->init();
+        resetProcessor(algorithm);
     }
     if (!algorithm->cardMounted || algorithm->activeSource != kSourceSample) {
         return;
@@ -327,7 +433,7 @@ void selectSource(Algorithm* algorithm, SourceMode source) {
     // Reset Capicola at the source boundary so no history from the replaced
     // source is rendered after the switch.
     algorithm->activeSource = source;
-    algorithm->processor->init();
+    resetProcessor(algorithm);
     algorithm->streamOpen = false;
 }
 
@@ -340,15 +446,14 @@ void parameterChanged(_NT_algorithm* base, int parameter) {
                              ? kSourceSample : kSourceLive);
             break;
         case kParamFolder:
+            refreshCatalog(algorithm);
             algorithm->streamOpen = false;
             if (algorithm->activeSource == kSourceSample) {
-                algorithm->processor->init();
-            }
-            if (algorithm->cardMounted) {
-                updateSampleRange(algorithm);
+                resetProcessor(algorithm);
             }
             break;
         case kParamSample:
+            refreshCatalog(algorithm);
             openSelectedSample(algorithm);
             break;
         case kParamPitch:
@@ -373,7 +478,7 @@ void parameterChanged(_NT_algorithm* base, int parameter) {
 int parameterString(_NT_algorithm* base, int parameter, int value, char* buffer) {
     Algorithm* algorithm = static_cast<Algorithm*>(base);
     const char* name = nullptr;
-    if (!algorithm->cardMounted) {
+    if (!NT_isSdCardMounted()) {
         return 0;
     }
 
@@ -412,34 +517,6 @@ int parameterString(_NT_algorithm* base, int parameter, int value, char* buffer)
     return static_cast<int>(std::strlen(buffer));
 }
 
-void updateCardState(Algorithm* algorithm) {
-    const bool mounted = NT_isSdCardMounted();
-    if (mounted == algorithm->cardMounted) {
-        return;
-    }
-    algorithm->cardMounted = mounted;
-    algorithm->streamOpen = false;
-    algorithm->processor->init();
-
-    const uint32_t folderCount = mounted ? NT_getNumSampleFolders() : 0;
-    algorithm->params[kParamFolder].max = folderCount == 0
-        ? 0
-        : static_cast<int16_t>(folderCount - 1U > 32767U
-            ? 32767U : folderCount - 1U);
-    NT_updateParameterDefinition(NT_algorithmIndex(algorithm), kParamFolder);
-    if (mounted) {
-        updateSampleRange(algorithm);
-        // The pinned SDK sample-streamer example re-applies the persisted
-        // Sample parameter when the card catalogue becomes available. Match
-        // that host lifecycle so a Sample-mode preset restores its exact
-        // saved catalogue indices. openSelectedSample() validates both indices
-        // and leaves Sample mode silent if the resource is unavailable.
-        if (algorithm->activeSource == kSourceSample) {
-            openSelectedSample(algorithm);
-        }
-    }
-}
-
 void writeOutput(float* destination,
                  const float* source,
                  int frames,
@@ -453,6 +530,25 @@ void writeOutput(float* destination,
             destination[i] += source[i];
         }
     }
+}
+
+void fadeToSilence(float* left, float* right, int frames,
+                   float startLeft, float startRight) {
+    const float scale = frames > 0 ? 1.0f / static_cast<float>(frames) : 0.0f;
+    for (int i = 0; i < frames; ++i) {
+        const float gain = 1.0f - static_cast<float>(i + 1) * scale;
+        left[i] = startLeft * gain;
+        right[i] = startRight * gain;
+    }
+}
+
+bool outputsAreFinite(const float* left, const float* right, int frames) {
+    for (int i = 0; i < frames; ++i) {
+        if (!std::isfinite(left[i]) || !std::isfinite(right[i])) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void writeAnalysisCv(float* busFrames,
@@ -479,7 +575,6 @@ void step(_NT_algorithm* base, float* busFrames, int numFramesBy4) {
     selectSource(algorithm,
                  algorithm->v[kParamSource] == kSourceSample
                      ? kSourceSample : kSourceLive);
-    updateCardState(algorithm);
     // Host parameter mapping can update v[] between callbacks; applying the
     // linked controls here keeps UI, mapped CV, live, and sample processing on
     // the same confirmed Capicola control surface.
@@ -487,43 +582,76 @@ void step(_NT_algorithm* base, float* busFrames, int numFramesBy4) {
 
     const float* left = nullptr;
     const float* right = nullptr;
+    bool sourceAvailable = true;
     if (algorithm->activeSource == kSourceLive) {
         const int leftInputBus = algorithm->v[kParamLeftInput];
         const int rightInputBus = algorithm->v[kParamRightInput];
-        left = busFrames + (leftInputBus - 1) * frames;
-        right = rightInputBus == 0
-            ? left
+        const float* rawLeft = busFrames + (leftInputBus - 1) * frames;
+        const float* rawRight = rightInputBus == 0
+            ? rawLeft
             : busFrames + (rightInputBus - 1) * frames;
+        for (int i = 0; i < frames; ++i) {
+            algorithm->sampleLeft[i] = std::isfinite(rawLeft[i])
+                ? rawLeft[i] : 0.0f;
+            algorithm->sampleRight[i] = std::isfinite(rawRight[i])
+                ? rawRight[i] : 0.0f;
+        }
+        left = algorithm->sampleLeft;
+        right = algorithm->sampleRight;
     } else {
         std::memset(algorithm->sampleLeft, 0, static_cast<std::size_t>(frames) * sizeof(float));
         std::memset(algorithm->sampleRight, 0, static_cast<std::size_t>(frames) * sizeof(float));
+        uint32_t count = 0;
         if (algorithm->streamOpen && NT_globals.workBuffer != nullptr &&
             NT_globals.workBufferSizeBytes >=
                 static_cast<uint32_t>(frames) * sizeof(_NT_frame)) {
             _NT_frame* rendered = reinterpret_cast<_NT_frame*>(NT_globals.workBuffer);
-            uint32_t count = NT_streamRender(algorithm->stream,
-                                             rendered,
-                                             static_cast<uint32_t>(frames),
-                                             algorithm->sampleSpeed);
+            count = NT_streamRender(algorithm->stream,
+                                    rendered,
+                                    static_cast<uint32_t>(frames),
+                                    algorithm->sampleSpeed);
             if (count > static_cast<uint32_t>(frames)) {
                 count = static_cast<uint32_t>(frames);
             }
             for (uint32_t i = 0; i < count; ++i) {
-                algorithm->sampleLeft[i] = rendered[i][0];
-                algorithm->sampleRight[i] = rendered[i][1];
+                algorithm->sampleLeft[i] = std::isfinite(rendered[i][0])
+                    ? rendered[i][0] : 0.0f;
+                algorithm->sampleRight[i] = std::isfinite(rendered[i][1])
+                    ? rendered[i][1] : 0.0f;
             }
+        }
+        sourceAvailable = count != 0;
+        if (!sourceAvailable) {
+            // Zero rendered frames means EOF or a host/card failure. Do not
+            // retry potentially blocking stream work from subsequent audio
+            // callbacks. A later Sample confirmation can refresh and reopen.
+            algorithm->streamOpen = false;
         }
         left = algorithm->sampleLeft;
         right = algorithm->sampleRight;
     }
 
-    // Render both channels before touching an output bus. This preserves
-    // correct routing when outputs alias inputs.
-    algorithm->processor->process(left,
-                                  right,
-                                  algorithm->scratchLeft,
-                                  algorithm->scratchRight,
-                                  static_cast<std::size_t>(frames));
+    bool rendered = sourceAvailable && !algorithm->processorFaulted;
+    if (rendered) {
+        // Render both channels before touching an output bus. This preserves
+        // correct routing when outputs alias inputs.
+        algorithm->processor->process(left,
+                                      right,
+                                      algorithm->scratchLeft,
+                                      algorithm->scratchRight,
+                                      static_cast<std::size_t>(frames));
+        rendered = outputsAreFinite(algorithm->scratchLeft,
+                                    algorithm->scratchRight, frames);
+        if (!rendered) {
+            algorithm->processorFaulted = true;
+        }
+    }
+    if (!rendered) {
+        fadeToSilence(algorithm->scratchLeft, algorithm->scratchRight, frames,
+                      algorithm->lastOutputLeft, algorithm->lastOutputRight);
+    }
+    algorithm->lastOutputLeft = algorithm->scratchLeft[frames - 1];
+    algorithm->lastOutputRight = algorithm->scratchRight[frames - 1];
 
     float* leftOutput = busFrames +
         (algorithm->v[kParamLeftOutput] - 1) * frames;
@@ -538,18 +666,25 @@ void step(_NT_algorithm* base, float* busFrames, int numFramesBy4) {
                 frames,
                 algorithm->v[kParamRightOutputMode] != 0);
 
+    const bool analysisValid = rendered &&
+        std::isfinite(algorithm->processor->inputEnvelope()) &&
+        std::isfinite(algorithm->processor->outputEnvelope());
     writeAnalysisCv(busFrames, frames,
                     algorithm->v[kParamInputTransientOutput],
-                    algorithm->processor->inputTransient() ? 5.0f : 0.0f);
+                    analysisValid && algorithm->processor->inputTransient()
+                        ? 5.0f : 0.0f);
     writeAnalysisCv(busFrames, frames,
                     algorithm->v[kParamOutputTransientOutput],
-                    algorithm->processor->outputTransient() ? 5.0f : 0.0f);
+                    analysisValid && algorithm->processor->outputTransient()
+                        ? 5.0f : 0.0f);
     writeAnalysisCv(busFrames, frames,
                     algorithm->v[kParamInputEnvelopeOutput],
-                    5.0f * algorithm->processor->inputEnvelope());
+                    analysisValid
+                        ? 5.0f * algorithm->processor->inputEnvelope() : 0.0f);
     writeAnalysisCv(busFrames, frames,
                     algorithm->v[kParamOutputEnvelopeOutput],
-                    5.0f * algorithm->processor->outputEnvelope());
+                    analysisValid
+                        ? 5.0f * algorithm->processor->outputEnvelope() : 0.0f);
 }
 
 void drawSelection(Algorithm* algorithm) {
@@ -558,7 +693,7 @@ void drawSelection(Algorithm* algorithm) {
     const bool folderView = algorithm->uiView == kUiFolderSelection;
     const int parameter = folderView ? kParamFolder : kParamSample;
     if (parameterString(algorithm, parameter, algorithm->v[parameter], name) == 0) {
-        std::strncpy(name, algorithm->cardMounted ? "Unavailable" : "No SD card",
+        std::strncpy(name, NT_isSdCardMounted() ? "Unavailable" : "No SD card",
                      sizeof(name) - 1);
     }
     std::snprintf(text, sizeof(text), "SELECT %s",
@@ -575,7 +710,9 @@ void formatControlValue(const Algorithm* algorithm, int parameter,
                         char* text, std::size_t size) {
     const long value = static_cast<long>(algorithm->v[parameter]);
     if (parameter == kParamPitch) {
-        std::snprintf(text, size, "%+.1f st", static_cast<double>(value) * 0.1);
+        const long magnitude = value < 0 ? -value : value;
+        std::snprintf(text, size, "%c%ld.%ld st",
+                      value < 0 ? '-' : '+', magnitude / 10, magnitude % 10);
     } else if (parameter == kParamGrainSize) {
         std::snprintf(text, size, "%ld", value);
     } else {
@@ -614,10 +751,14 @@ bool draw(_NT_algorithm* base) {
         NT_drawText(x, 40, text);
     }
 
-    const long inputEnvelope = static_cast<long>(
-        std::fmin(1.0f, algorithm->processor->inputEnvelope()) * 99.0f + 0.5f);
-    const long outputEnvelope = static_cast<long>(
-        std::fmin(1.0f, algorithm->processor->outputEnvelope()) * 99.0f + 0.5f);
+    const float rawInputEnvelope = algorithm->processor->inputEnvelope();
+    const float rawOutputEnvelope = algorithm->processor->outputEnvelope();
+    const float safeInputEnvelope = std::isfinite(rawInputEnvelope)
+        ? std::fmin(1.0f, std::fmax(0.0f, rawInputEnvelope)) : 0.0f;
+    const float safeOutputEnvelope = std::isfinite(rawOutputEnvelope)
+        ? std::fmin(1.0f, std::fmax(0.0f, rawOutputEnvelope)) : 0.0f;
+    const long inputEnvelope = static_cast<long>(safeInputEnvelope * 99.0f + 0.5f);
+    const long outputEnvelope = static_cast<long>(safeOutputEnvelope * 99.0f + 0.5f);
     std::snprintf(text, sizeof(text), "%s  IN %02ld%c OUT %02ld%c  MIX %ld%%",
                   algorithm->alternateControls ? "ALT" : "MAIN",
                   inputEnvelope,

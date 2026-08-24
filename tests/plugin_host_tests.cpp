@@ -24,6 +24,8 @@ uint32_t gStreamRenderCalls = 0;
 uint32_t gStreamOpenCalls = 0;
 uint32_t gFolderInfoCalls = 0;
 uint32_t gFileInfoCalls = 0;
+uint32_t gCardMountChecks = 0;
+uint32_t gParameterDefinitionUpdates = 0;
 bool gInvalidCatalogLookup = false;
 uint32_t gStreamClock = 0;
 uint32_t gOpenedFolder = 0;
@@ -79,6 +81,7 @@ extern "C" const _NT_globals NT_globals = {
 };
 
 extern "C" bool NT_isSdCardMounted() {
+    ++gCardMountChecks;
     return gCardMounted;
 }
 
@@ -129,6 +132,9 @@ extern "C" uint32_t NT_streamRender(_NT_stream,
                                       float speed) {
     ++gStreamRenderCalls;
     gOpenedSpeed = speed;
+    if (!gCardMounted) {
+        return 0;
+    }
     for (uint32_t i = 0; i < numFrames; ++i, ++gStreamClock) {
         renderBuffer[i][0] = std::sin(2.0f * kPi * 330.0f * gStreamClock / 48000.0f);
         renderBuffer[i][1] = gOpenedSample == 0
@@ -142,7 +148,9 @@ extern "C" int32_t NT_algorithmIndex(const _NT_algorithm*) {
     return 0;
 }
 
-extern "C" void NT_updateParameterDefinition(uint32_t, uint32_t) {}
+extern "C" void NT_updateParameterDefinition(uint32_t, uint32_t) {
+    ++gParameterDefinitionUpdates;
+}
 
 extern "C" uint32_t NT_parameterOffset() {
     return 0;
@@ -172,16 +180,15 @@ int main() {
 
     _NT_algorithmRequirements requirements{};
     factory->calculateRequirements(requirements, nullptr);
-    std::vector<std::max_align_t> sram(
-        (requirements.sram + sizeof(std::max_align_t) - 1) / sizeof(std::max_align_t));
-    std::vector<std::max_align_t> dram(
-        (requirements.dram + sizeof(std::max_align_t) - 1) / sizeof(std::max_align_t));
-    std::vector<std::max_align_t> dtc(
-        (requirements.dtc + sizeof(std::max_align_t) - 1) / sizeof(std::max_align_t));
+    // The API exposes byte pointers, so deliberately offset each allocation.
+    // Construction must align every typed object within the requested budget.
+    std::vector<uint8_t> sram(requirements.sram + 1U);
+    std::vector<uint8_t> dram(requirements.dram + 1U);
+    std::vector<uint8_t> dtc(requirements.dtc + 1U);
     _NT_algorithmMemoryPtrs memory{
-        reinterpret_cast<uint8_t*>(sram.data()),
-        reinterpret_cast<uint8_t*>(dram.data()),
-        reinterpret_cast<uint8_t*>(dtc.data()),
+        sram.data() + 1,
+        dram.data() + 1,
+        dtc.data() + 1,
         nullptr,
     };
     _NT_algorithm* algorithm = factory->construct(memory, requirements, nullptr);
@@ -290,21 +297,15 @@ int main() {
 
     // The host persists ordinary parameter values in its preset. Recreate a
     // fresh instance with those values already restored, including Sample
-    // mode, before the SD catalogue becomes available to the instance. The
-    // first mounted step must reopen that exact valid folder/sample pair.
-    std::vector<std::max_align_t> restoredSram(
-        (requirements.sram + sizeof(std::max_align_t) - 1) /
-        sizeof(std::max_align_t));
-    std::vector<std::max_align_t> restoredDram(
-        (requirements.dram + sizeof(std::max_align_t) - 1) /
-        sizeof(std::max_align_t));
-    std::vector<std::max_align_t> restoredDtc(
-        (requirements.dtc + sizeof(std::max_align_t) - 1) /
-        sizeof(std::max_align_t));
+    // mode. Host parameter callbacks restore the valid resource before the
+    // first audio step; step itself must do no catalogue or stream-open work.
+    std::vector<uint8_t> restoredSram(requirements.sram + 1U);
+    std::vector<uint8_t> restoredDram(requirements.dram + 1U);
+    std::vector<uint8_t> restoredDtc(requirements.dtc + 1U);
     _NT_algorithmMemoryPtrs restoredMemory{
-        reinterpret_cast<uint8_t*>(restoredSram.data()),
-        reinterpret_cast<uint8_t*>(restoredDram.data()),
-        reinterpret_cast<uint8_t*>(restoredDtc.data()),
+        restoredSram.data() + 1,
+        restoredDram.data() + 1,
+        restoredDtc.data() + 1,
         nullptr,
     };
     _NT_algorithm* restored = factory->construct(
@@ -315,15 +316,22 @@ int main() {
     restoredValues[sample] = 1;
     restored->v = restoredValues.data();
     gAlgorithm = restored;
+    const uint32_t opensBeforePresetRestore = gStreamOpenCalls;
     factory->parameterChanged(restored, source);
     factory->parameterChanged(restored, folder);
     factory->parameterChanged(restored, sample);
-    const uint32_t opensBeforePresetRestore = gStreamOpenCalls;
+    const uint32_t folderCallsBeforeRestoredStep = gFolderInfoCalls;
+    const uint32_t fileCallsBeforeRestoredStep = gFileInfoCalls;
+    const uint32_t definitionUpdatesBeforeRestoredStep =
+        gParameterDefinitionUpdates;
     std::vector<float> restoredBuses(kNT_lastBus * kFrames, 0.0f);
     factory->step(restored, restoredBuses.data(), kFrames / 4);
     if (gStreamOpenCalls != opensBeforePresetRestore + 1 ||
         gOpenedFolder != 0 || gOpenedSample != 1 ||
-        gStreamRenderCalls == 0 || restoredValues[source] != 1) {
+        gStreamRenderCalls == 0 || restoredValues[source] != 1 ||
+        gFolderInfoCalls != folderCallsBeforeRestoredStep ||
+        gFileInfoCalls != fileCallsBeforeRestoredStep ||
+        gParameterDefinitionUpdates != definitionUpdatesBeforeRestoredStep) {
         return fail("valid host-persisted sample reference was not restored");
     }
     gAlgorithm = algorithm;
@@ -374,6 +382,15 @@ int main() {
         !drawnTextContains("QUALITY")) {
         return fail("alternate pot functions did not show their identity and value");
     }
+    ui = {};
+    ui.controls = kNT_potL;
+    ui.pots[0] = 0.25f;
+    factory->customUi(algorithm, ui);
+    gDrawnText.clear();
+    factory->draw(algorithm);
+    if (values[pitch] != -60 || !drawnTextContains("-6.0 st")) {
+        return fail("negative Pitch value did not update on the performance screen");
+    }
     // Every pressable pot switches the shared MAIN/ALT performance bank.
     ui = {};
     ui.controls = kNT_potButtonC;
@@ -423,6 +440,44 @@ int main() {
                 return fail("default-disconnected analysis selector claimed a bus");
             }
         }
+    }
+    std::fill(buses.begin(), buses.end(), 0.0f);
+
+    // Simulate SD/catalogue activity caused by opening an external Source panel
+    // while audio is running. Even rapid host-mapped Source changes must keep
+    // step() independent of card state, catalogue queries, definition updates,
+    // and stream opens, and every produced frame must remain finite.
+    const uint32_t mountChecksBeforeSourceActivity = gCardMountChecks;
+    const uint32_t folderCallsBeforeSourceActivity = gFolderInfoCalls;
+    const uint32_t fileCallsBeforeSourceActivity = gFileInfoCalls;
+    const uint32_t updatesBeforeSourceActivity = gParameterDefinitionUpdates;
+    const uint32_t opensBeforeSourceActivity = gStreamOpenCalls;
+    const uint32_t rendersBeforeSourceActivity = gStreamRenderCalls;
+    for (int block = 0; block < 256; ++block) {
+        gCardMounted = (block & 1) == 0;
+        values[source] = block & 1;
+        std::fill(buses.begin(), buses.end(), 0.0f);
+        for (int i = 0; i < kFrames; ++i) {
+            buses[i] = 0.25f;
+        }
+        factory->step(algorithm, buses.data(), kFrames / 4);
+        for (int i = 0; i < kFrames; ++i) {
+            if (!std::isfinite(buses[12 * kFrames + i]) ||
+                !std::isfinite(buses[13 * kFrames + i])) {
+                return fail("source activity produced an invalid audio frame");
+            }
+        }
+    }
+    gCardMounted = true;
+    values[source] = 0;
+    factory->step(algorithm, buses.data(), kFrames / 4);
+    if (gCardMountChecks != mountChecksBeforeSourceActivity ||
+        gFolderInfoCalls != folderCallsBeforeSourceActivity ||
+        gFileInfoCalls != fileCallsBeforeSourceActivity ||
+        gParameterDefinitionUpdates != updatesBeforeSourceActivity ||
+        gStreamOpenCalls != opensBeforeSourceActivity ||
+        gStreamRenderCalls != rendersBeforeSourceActivity) {
+        return fail("audio step performed SD catalogue or stream setup work");
     }
     std::fill(buses.begin(), buses.end(), 0.0f);
 
@@ -726,24 +781,45 @@ int main() {
         }
     }
 
-    // The pinned SDK host lifecycle reapplies the persisted sample selection
-    // when the card catalogue mounts. A valid selection reopens exactly, while
-    // resource failures retain Sample mode and silence rather than substituting
-    // a catalogue entry or falling back to live input.
+    // Card loss or a zero-frame stream result is handled inside step() only by
+    // dropping/fading the block and closing the stream. Remounting must not run
+    // catalogue discovery or reopen work on the audio thread. Explicit Sample
+    // confirmation performs recovery outside that thread.
     const uint32_t opensBeforeRemount = gStreamOpenCalls;
     const uint32_t rendersBeforeRemount = gStreamRenderCalls;
+    const uint32_t mountChecksBeforeRemount = gCardMountChecks;
+    const uint32_t folderCallsBeforeRemount = gFolderInfoCalls;
+    const uint32_t fileCallsBeforeRemount = gFileInfoCalls;
+    const uint32_t updatesBeforeRemount = gParameterDefinitionUpdates;
     gCardMounted = false;
     factory->step(algorithm, buses.data(), kFrames / 4);
     gCardMounted = true;
     factory->step(algorithm, buses.data(), kFrames / 4);
-    if (gStreamOpenCalls != opensBeforeRemount + 1 ||
+    if (gStreamOpenCalls != opensBeforeRemount ||
         gStreamRenderCalls != rendersBeforeRemount + 1 ||
+        gCardMountChecks != mountChecksBeforeRemount ||
+        gFolderInfoCalls != folderCallsBeforeRemount ||
+        gFileInfoCalls != fileCallsBeforeRemount ||
+        gParameterDefinitionUpdates != updatesBeforeRemount) {
+        return fail("audio step performed card recovery or catalogue work");
+    }
+    for (int i = 0; i < kFrames; ++i) {
+        if (buses[12 * kFrames + i] != 0.0f ||
+            buses[13 * kFrames + i] != 0.0f) {
+            return fail("zero-frame stream failure did not fade to silence");
+        }
+    }
+    factory->parameterChanged(algorithm, sample);
+    factory->step(algorithm, buses.data(), kFrames / 4);
+    if (gStreamOpenCalls != opensBeforeRemount + 1 ||
+        gStreamRenderCalls != rendersBeforeRemount + 2 ||
         gOpenedFolder != 1 || gOpenedSample != 0) {
-        return fail("valid sample reference did not reopen on card remount");
+        return fail("explicit Sample confirmation did not recover after remount");
     }
 
     // Missing or moved catalogue entry: the saved folder index is no longer
-    // present. No lookup/open is attempted and Sample mode remains selected.
+    // present. Explicit confirmation performs no invalid lookup/open and Sample
+    // mode remains selected.
     gCardMounted = false;
     factory->step(algorithm, buses.data(), kFrames / 4);
     gNumFolders = 1;
@@ -751,6 +827,7 @@ int main() {
     const uint32_t filesBeforeMissing = gFileInfoCalls;
     gCardMounted = true;
     factory->step(algorithm, buses.data(), kFrames / 4);
+    factory->parameterChanged(algorithm, sample);
     if (values[source] != 1 || gStreamOpenCalls != opensBeforeMissing ||
         gFileInfoCalls != filesBeforeMissing || gInvalidCatalogLookup) {
         return fail("missing sample reference substituted or fell back to live input");
@@ -767,11 +844,8 @@ int main() {
     values[folder] = 0;
     values[sample] = 1;
     gSampleMetadataSupported = false;
-    gCardMounted = false;
-    factory->step(algorithm, buses.data(), kFrames / 4);
     const uint32_t opensBeforeUnsupported = gStreamOpenCalls;
-    gCardMounted = true;
-    factory->step(algorithm, buses.data(), kFrames / 4);
+    factory->parameterChanged(algorithm, sample);
     if (values[source] != 1 || gStreamOpenCalls != opensBeforeUnsupported) {
         return fail("unsupported sample substituted or fell back to live input");
     }
@@ -780,13 +854,12 @@ int main() {
     // authoritative. The wrapper retains Sample mode and renders silence.
     gSampleMetadataSupported = true;
     gStreamOpenSucceeds = false;
-    gCardMounted = false;
-    factory->step(algorithm, buses.data(), kFrames / 4);
     const uint32_t opensBeforeUnreadable = gStreamOpenCalls;
-    gCardMounted = true;
+    const uint32_t rendersBeforeUnreadable = gStreamRenderCalls;
+    factory->parameterChanged(algorithm, sample);
     factory->step(algorithm, buses.data(), kFrames / 4);
     if (values[source] != 1 || gStreamOpenCalls != opensBeforeUnreadable + 1 ||
-        gStreamRenderCalls != rendersBeforeRemount + 1) {
+        gStreamRenderCalls != rendersBeforeUnreadable) {
         return fail("unreadable sample substituted, rendered, or fell back to live input");
     }
     for (int i = 0; i < kFrames; ++i) {

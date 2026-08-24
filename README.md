@@ -114,6 +114,9 @@ The Source, Folder, and Sample selections are ordinary NT preset parameters.
 Keep the SD sample catalogue stable when a preset depends on a sample. If the
 saved catalogue indices are invalid or the selected file is unreadable,
 Capicola remains in Sample mode and outputs silence—it does not switch to Live.
+After removing or remounting the SD card, confirm **Sample** again to reopen it;
+Capicola does not perform catalogue discovery or stream setup in the audio
+callback.
 
 Capicola does not add looping, reverse playback, scrubbing, regions, chopping,
 polyphony, recording, or live/sample mixing.
@@ -172,7 +175,7 @@ analysis signal and an audio output—to the same bus.
 - **A mono patch is only on the left:** set Right input to `None` to normalize
   Left input to both channels.
 - **The display says SAMPLE WAIT:** make sure the SD card is mounted and the
-  selected folder/sample still exists, then select the sample again.
+  selected folder/sample still exists, then confirm Sample or select it again.
 - **A sample stops:** sample playback is intentionally one-shot; confirm the
   Sample parameter again to restart it.
 - **The level keeps increasing:** set Feedback below 100%, preferably to 0%

@@ -1,0 +1,43 @@
+diff --git a/SparseLine.h b/SparseLine.h
+--- a/SparseLine.h
++++ b/SparseLine.h
+@@ -143,25 +143,35 @@ public:
+     // Walk a known-good window (either direction, wrap-correct) until it brackets
+-    // `index`. Only one loop runs. Anchor from a nearby window; use WindowAt for
+-    // far jumps.
++    // `index`. Nearby motion stays incremental; an unexpected far jump falls
++    // back to the logarithmic search so audio work cannot degrade to O(bufsz).
+     inline void StepWindow(Window& w, double index) {
+         long long newest = writePos - 1;
+         long long oldest = Oldest();
+-        while (index > w.endTime && w.index < newest) {          // cursor ahead: step forward
++        constexpr int kMaxIncrementalSteps = 32;
++        int steps = 0;
++        while (index > w.endTime && w.index < newest &&
++               steps < kMaxIncrementalSteps) {                    // cursor ahead
+             w.index++;
+             w.p2 = w.p1;
+             w.p1 = &buffer[w.index & (bufsz - 1)];
+             float duration = (float)(w.p1->time - w.p2->time);
+             w.duration = duration;
+             w.invDuration = (duration > 1e-5f) ? (1.0f / duration) : 0.0f;
+             w.endTime = w.p1->time;
++            steps++;
+         }
+-        while (index < w.p2->time && w.index > oldest + 1) {     // cursor behind: step backward
++        while (index < w.p2->time && w.index > oldest + 1 &&
++               steps < kMaxIncrementalSteps) {                    // cursor behind
+             w.index--;
+             w.p1 = w.p2;
+             w.p2 = &buffer[(w.index - 1) & (bufsz - 1)];
+             float duration = (float)(w.p1->time - w.p2->time);
+             w.duration = duration;
+             w.invDuration = (duration > 1e-5f) ? (1.0f / duration) : 0.0f;
+             w.endTime = w.p1->time;
++            steps++;
++        }
++        if ((index > w.endTime && w.index < newest) ||
++            (index < w.p2->time && w.index > oldest + 1)) {
++            w = WindowAt(index);
+         }
+    }

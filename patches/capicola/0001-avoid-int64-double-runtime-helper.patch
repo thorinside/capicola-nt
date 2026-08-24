@@ -1,0 +1,45 @@
+diff --git a/Analyzer.h b/Analyzer.h
+--- a/Analyzer.h
++++ b/Analyzer.h
+@@ -4,3 +4,4 @@
+ #include <SparseLine.h>   // shared sparse keyframe buffer (Keyframe/Window)
+ #include <cmath>
++#include <capicola_nt/int64_to_double.h>
+ #include <cstdint>
+@@ -62,3 +63,3 @@ public:
+     float  SampleRate()    const { return fs; }
+-    double Seconds()       const { return (double)rawCount / fs; }
++    double Seconds()       const { return capicola_nt::int64ToDouble(rawCount) / fs; }
+     Keyframe* GetLatest()        { return sparse->GetLatest(); }
+@@ -68,3 +69,3 @@ public:
+-    double LiveEdge(int blockSize) const { return (double)(rawCount - 1 - blockSize); }
++    double LiveEdge(int blockSize) const { return capicola_nt::int64ToDouble(rawCount - 1 - blockSize); }
+-
++
+     // Local record-edge bandwidth: 1 / raw-sample interval between the two
+@@ -93,4 +94,4 @@ public:
+         kf.value = mostRecent.value;
+-        kf.time  = (rawCount > 0) ? (double)(rawCount - 1) : 0.0;
++        kf.time  = (rawCount > 0) ? capicola_nt::int64ToDouble(rawCount - 1) : 0.0;
+-
++
+         float valueDiff = std::abs(mostRecent.value - lastFrame->value);
+@@ -108,6 +109,6 @@ public:
+         if (crossedD1 && valueDiff > threshold) {
+             // Fractional peak location between the two front-end taps.
+             float  alpha = std::abs(older.d1) / (std::abs(older.d1) + std::abs(mostRecent.d1));
+-            double index = (double)(rawCount - 2) + alpha;
++            double index = capicola_nt::int64ToDouble(rawCount - 2) + alpha;
+             if (std::abs(index - lastFrame->time) > 1.0) {
+                 kf.time  = index;
+@@ -132,3 +133,3 @@ public:
+     bool GuardKeyframe(double maxGap) {
+-        if ((double)rawCount - sparse->GetLatest()->time <= maxGap)
++        if (capicola_nt::int64ToDouble(rawCount) - sparse->GetLatest()->time <= maxGap)
+             return false;
+@@ -136,4 +137,4 @@ public:
+         Keyframe kf;
+         kf.value = mostRecent.value;
+-        kf.time  = (rawCount > 0) ? (double)(rawCount - 1) : 0.0;
++        kf.time  = (rawCount > 0) ? capicola_nt::int64ToDouble(rawCount - 1) : 0.0;
+         sparse->Write(kf);
