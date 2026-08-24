@@ -945,7 +945,7 @@ int main() {
     }
 
     // A wet folder change keeps the already-running processor warm while the
-    // replacement stream advances through a 50 ms fade-out and 50 ms fade-in.
+    // old stream fades out and the primed replacement fades in over 50 ms each.
     // Only the single midpoint sample may be forced to zero; there must be no
     // cold-engine silence between the samples.
     const uint32_t opensBeforeFolderChange = gStreamOpenCalls;
@@ -994,9 +994,9 @@ int main() {
     }
 
     // Reopen the same sample at dry Mix so the exact two-phase gain and source
-    // position can be checked. The new stream is consumed throughout both
-    // phases and crosses zero for exactly one sample without waiting for a new
-    // audio block.
+    // position can be checked. The old stream runs to the zero-gain midpoint;
+    // the primed replacement then starts at frame zero without waiting for a
+    // new audio block.
     values[mix] = 0;
     const float oldSourcePosition = gStreamSourcePosition;
     pressSampleLoad();
@@ -1006,7 +1006,7 @@ int main() {
         factory->step(algorithm, buses.data(), kFrames / 4);
         if (gStreamRenderCalls != rendersBeforeDryTransition +
                 static_cast<uint32_t>(block + 2)) {
-            return fail("replacement stream did not run throughout its transition");
+            return fail("old and replacement streams did not render at the handoff");
         }
         for (int i = 0; i < kFrames; ++i) {
             const int transitionFrame = block * kFrames + i;

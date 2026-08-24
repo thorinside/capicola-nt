@@ -106,8 +106,9 @@ arbitrary paths itself.
    turn to choose a folder and press to continue.
 4. On **SELECT SAMPLE**, turn to choose a sample and press **LOAD** to start it.
 5. The performance screen returns immediately. Its title keeps **CAPICOLA**
-   followed by the compact sample name. **CAPICOLA WAIT** means that the stream
-   could not be opened.
+   followed by the compact name of the sample that is currently audible. During
+   a replacement it keeps the old name until the silent handoff, then changes to
+   the new name. **CAPICOLA WAIT** means that no sample stream is available.
 
 Samples loop continuously, forward, from the beginning. Changing Folder opens
 the current valid Sample in that folder; if the old Sample number is outside the
@@ -125,6 +126,7 @@ at the silent midpoint, and fades the new stream up over 50 ms. The switch can
 happen inside an audio block, so there is no extra silent block and the new
 stream cannot arrive early as a click. The processing engine remains warm. This
 fixed click-safety transition is separate from the **Fade** processing control.
+Selecting the currently audible sample again cancels a pending replacement.
 
 The Source, Folder, and Sample selections are ordinary NT preset parameters.
 Keep the SD sample catalogue stable when a preset depends on a sample. If the

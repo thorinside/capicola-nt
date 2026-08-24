@@ -56,9 +56,11 @@ The custom UI owns three pressable pots and two pressable encoders. Its two
 labelled pot banks and temporary folder/sample selector are documented in the
 [user guide](../README.md). The title always retains **CAPICOLA** and follows it
 with a sample stem limited to 32 characters using a middle ellipsis; repeated
-trailing audio extensions are removed. The footer contains only Mix, with
-analysis activity left to the optional CV outputs. Stretch retains the upstream
-taper but is rendered as a time factor or **FREEZE**. Pot-originated values are
+trailing audio extensions are removed. During a prepared replacement, the title
+continues naming the audible old stream until the zero-gain handoff. The footer
+contains only Mix, with analysis activity left to the optional CV outputs.
+Stretch retains the upstream taper but is rendered as a time factor or
+**FREEZE**. Pot-originated values are
 mirrored immediately for display while the host commits the parameter update.
 All twelve continuous processing controls remain ordinary host parameters on
 the Performance page.
@@ -72,8 +74,9 @@ inside one audio block, so only one midpoint sample is forced to zero and there
 is no cold-engine or block-boundary silence gap. The stream state, prefetch block,
 counters, and failure-path held stereo values live in the instance, and the
 per-sample work is bounded. This transition does not alter the user-facing
-**Fade** processing parameter. Entering Sample mode from another source still
-resets the engine at that source boundary.
+**Fade** processing parameter. Selecting the still-active stream again cancels a
+pending handoff. Entering Sample mode from another source still resets the engine
+at that source boundary.
 
 ## Pinned source and platform
 
