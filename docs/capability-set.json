@@ -1,0 +1,167 @@
+{
+  "schemaVersion": 1,
+  "auditStatus": "approved-delivery-baseline",
+  "upstream": {
+    "repository": "https://github.com/heavylight-industries/capicola.git",
+    "commit": "f0fb61cfa7111067b4ec1a642d1b16a0910adb3b",
+    "tag": null
+  },
+  "platformBaseline": {
+    "firmware": "1.16.0",
+    "sdkRepository": "https://github.com/expertsleepersltd/distingNT_API.git",
+    "sdkTag": "v1.16.0",
+    "sdkCommit": "cd12d876dbe060859828053efab1cbc98c9df251",
+    "apiVersion": 13,
+    "sampleRateHz": 48000,
+    "releaseVerificationPending": true
+  },
+  "processingCapabilities": [
+    {
+      "id": "pitch",
+      "label": "Pitch",
+      "range": "-12 to +12 semitones; zero detent",
+      "upstreamEvidence": ["vendor/capicola/src/main.cpp:VirtualKnob pitch", "vendor/capicola/src/audio/audio_engine.cpp:AudioEngine::SetSlicePitch"],
+      "ntLimit": "One shared stereo parameter; ordinary NT parameter mapping supplies modulation."
+    },
+    {
+      "id": "stretch",
+      "label": "Stretch",
+      "range": "1.0 (real time) to 0.0 (freeze), using the upstream (1-x)^2.5 control taper",
+      "upstreamEvidence": ["vendor/capicola/src/main.cpp:VirtualKnob stretch", "vendor/capicola/src/main.cpp:StretchCurve", "vendor/capicola/src/audio/audio_engine.cpp:AudioEngine::SetSliceStretch"],
+      "ntLimit": "One shared stereo parameter; no independent transport-speed control."
+    },
+    {
+      "id": "transientThreshold",
+      "label": "Threshold",
+      "range": "adaptive envelope-average ratio 0 to 8; top-of-range disables automatic triggers",
+      "upstreamEvidence": ["vendor/capicola/src/main.cpp:VirtualKnob threshold", "vendor/capicola/src/audio/audio_engine.cpp:AudioEngine::SetTransientThreshold", "vendor/capicola/lib/Detector.h:void SetThreshold"],
+      "ntLimit": "Shared by input and output detectors; only input kept events trigger a splice."
+    },
+    {
+      "id": "grainSize",
+      "label": "Grain Size",
+      "range": "32 to 4096 keyframes",
+      "upstreamEvidence": ["vendor/capicola/src/main.cpp:VirtualKnob grainSize", "vendor/capicola/src/audio/audio_engine.cpp:AudioEngine::SetGrainSize"],
+      "ntLimit": "Integer keyframe leash, shared by both channels."
+    },
+    {
+      "id": "quality",
+      "label": "Quality",
+      "range": "analyzer epsilon 0.1 (coarse) to 0.001 (fine)",
+      "upstreamEvidence": ["vendor/capicola/src/main.cpp:VirtualKnob quality", "vendor/capicola/src/audio/audio_engine.cpp:AudioEngine::SetQuality", "vendor/capicola/lib/Analyzer.h:void SetThreshold"],
+      "ntLimit": "Shared by both channels; the displayed direction must preserve clockwise=finer."
+    },
+    {
+      "id": "feedback",
+      "label": "Feedback",
+      "range": "0 to 1.5 loop gain",
+      "upstreamEvidence": ["vendor/capicola/src/main.cpp:VirtualKnob feedback", "vendor/capicola/src/audio/audio_engine.cpp:AudioEngine::SetFeedback"],
+      "ntLimit": "Shared stereo control; values above 1.0 are intentionally unstable, with upstream injection clamped to +/-1."
+    },
+    {
+      "id": "envelopeSmoothing",
+      "label": "Envelope Smoothing",
+      "range": "normalized cutoff 0.00005 to 0.125 (approximately 1.2 Hz to 3 kHz at 48 kHz), exponential",
+      "upstreamEvidence": ["vendor/capicola/src/main.cpp:SecValue", "vendor/capicola/src/audio/audio_engine.cpp:AudioEngine::SetTkeoCutoff", "vendor/capicola/lib/filter.h:void SetControls"],
+      "ntLimit": "Shared by input and output analysis; frequency figures are valid only at the pinned 48 kHz baseline."
+    },
+    {
+      "id": "fade",
+      "label": "Fade",
+      "range": "10 to 250 ms (480 to 12000 frames at 48 kHz), exponential",
+      "upstreamEvidence": ["vendor/capicola/src/main.cpp:SecValue", "vendor/capicola/src/audio/audio_engine.cpp:AudioEngine::SetFade"],
+      "ntLimit": "The same value controls OLA crossfade, wet latency, and automatic-trigger retrigger floor."
+    },
+    {
+      "id": "drive",
+      "label": "Drive",
+      "range": "0.5 to 4.0",
+      "upstreamEvidence": ["vendor/capicola/src/main.cpp:SecValue", "vendor/capicola/src/audio/audio_engine.cpp:AudioEngine::SetDrive"],
+      "ntLimit": "Applied to sparse keyframes, shared by both channels."
+    },
+    {
+      "id": "driveCharacter",
+      "label": "Drive Character",
+      "range": "0.0 quake through 0.5 clean to 1.0 sinc",
+      "upstreamEvidence": ["vendor/capicola/src/main.cpp:SecValue", "vendor/capicola/lib/KeyframeRecorder.h:inline float Shape"],
+      "ntLimit": "Continuous morph; shared by both channels."
+    },
+    {
+      "id": "mix",
+      "label": "Mix",
+      "range": "0.0 dry to 1.0 wet",
+      "upstreamEvidence": ["vendor/capicola/src/main.cpp:SecValue", "vendor/capicola/src/audio/audio_engine.cpp:AudioEngine::SetMix"],
+      "ntLimit": "The wet path is delayed by Fade, so intermediate values may comb with sustained input."
+    },
+    {
+      "id": "feedbackTone",
+      "label": "Feedback Tone",
+      "range": "normalized bandpass center 0.002 to 0.9 (approximately 48 Hz to 21.6 kHz at 48 kHz), exponential",
+      "upstreamEvidence": ["vendor/capicola/src/main.cpp:SecValue", "vendor/capicola/src/audio/audio_engine.cpp:AudioEngine::SetFeedbackCutoff"],
+      "ntLimit": "Shared stereo feedback-path control; frequency figures are valid only at the pinned 48 kHz baseline."
+    },
+    {
+      "id": "manualSlice",
+      "label": "Slice",
+      "range": "momentary action",
+      "upstreamEvidence": ["vendor/capicola/src/audio/audio_engine.cpp:AudioEngine::TriggerSlice", "vendor/capicola/lib/KeyframeRecorder.h:Request::SLICE"],
+      "ntLimit": "UI action only; version 1 adds no dedicated trigger-CV input."
+    }
+  ],
+  "analysisSignals": [
+    {
+      "id": "inputTransient",
+      "label": "Input Transient",
+      "upstreamEvidence": "vendor/capicola/src/audio/audio_engine.h:InGate()     const",
+      "ntLimit": "Optional 0/5 V CV output assignment; selector 0 means disconnected."
+    },
+    {
+      "id": "outputTransient",
+      "label": "Output Transient",
+      "upstreamEvidence": "vendor/capicola/src/audio/audio_engine.h:OutGate()    const",
+      "ntLimit": "Optional 0/5 V CV output assignment; selector 0 means disconnected; never triggers a splice."
+    },
+    {
+      "id": "inputEnvelope",
+      "label": "Input Envelope",
+      "upstreamEvidence": "vendor/capicola/src/audio/audio_engine.h:EnvNormIn()  const",
+      "ntLimit": "Optional 0-5 V CV output assignment; selector 0 means disconnected."
+    },
+    {
+      "id": "outputEnvelope",
+      "label": "Output Envelope",
+      "upstreamEvidence": "vendor/capicola/src/audio/audio_engine.h:EnvNormOut() const",
+      "ntLimit": "Optional 0-5 V CV output assignment; selector 0 means disconnected."
+    }
+  ],
+  "sampleSourceBoundary": {
+    "classification": "NT wrapper source adapter, not an upstream sampler capability",
+    "acceptedCatalog": "Only files enumerated by the pinned NT sample-folder APIs",
+    "metadata": "uint32 frame count and sample rate; mono or stereo; 8-, 16-, 24-bit PCM or 32-bit float as represented by _NT_wavInfo",
+    "conversion": "The pinned API can convert requested channel count and bit depth and can stream at a speed derived from file sample rate / host sample rate.",
+    "wrapperLimits": "Mono is duplicated to the stereo engine. Stereo preserves channel order. No wrapper duration ceiling is imposed beyond the host API's uint32 frame metadata and successful streaming. Unsupported or unreadable files remain host errors.",
+    "notSamplerFeatures": ["recording", "looping", "reverse", "scrubbing", "start/end editing", "slicing/chopping", "polyphonic playback", "live/sample mixing", "silent sample substitution"]
+  },
+  "excludedUpstreamSurface": [
+    {
+      "id": "customModulationMatrix",
+      "reason": "The approved wrapper uses ordinary NT parameter mapping instead of Capicola's Alchemy-panel depth/routing pages."
+    },
+    {
+      "id": "dedicatedTriggerCv",
+      "reason": "Dedicated processing-control CV inputs are out of scope for version 1."
+    },
+    {
+      "id": "recordAndPlaybackTransport",
+      "reason": "KeyframeRecorder RECORDING and PLAYBACK states are internal engine mechanisms, not an approved user-facing sampler transport."
+    },
+    {
+      "id": "cpuMeter",
+      "reason": "Upstream diagnostic telemetry is not an audio-processing capability or first-release user feature."
+    },
+    {
+      "id": "tkeoResonance",
+      "reason": "The upstream engine setter is not exposed by Capicola's audited panel UI and its uncapped range is not part of the first-release surface."
+    }
+  ]
+}

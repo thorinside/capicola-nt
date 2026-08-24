@@ -1,0 +1,6 @@
+[submodule "vendor/capicola"]
+	path = vendor/capicola
+	url = https://github.com/heavylight-industries/capicola.git
+[submodule "vendor/distingNT_API"]
+	path = vendor/distingNT_API
+	url = https://github.com/expertsleepersltd/distingNT_API.git
