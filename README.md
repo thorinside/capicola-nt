@@ -28,10 +28,9 @@ release information in the shorter [technical reference](docs/TECHNICAL.md).
 5. On the disting NT, add an algorithm and select **Capicola** from the effect
    plug-ins.
 
-If Capicola is visible in NT Gallery, you can instead search for it in **Plugin
-Manager** and choose **Install**. If it does not appear in the NT algorithm list
-after installation, rescan or restart the NT and confirm that the module is
-running the supported firmware baseline.
+If Capicola does not appear in the NT algorithm list after installation, rescan
+or restart the NT and confirm that the module is running the supported firmware
+baseline.
 
 ### Manual installation
 

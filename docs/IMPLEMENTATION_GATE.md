@@ -4,9 +4,9 @@
 
 **Approved — implementation may proceed only within the approved Spec.**
 
-The project owner and administrator completed discovery and approved the controlling first-release Spec before implementation began. The immutable approved revision is stored at [`APPROVED_SPEC.md`](APPROVED_SPEC.md).
+The project owner and administrator completed discovery and approved the controlling first-release Spec before implementation began. The current approved revision is stored at [`APPROVED_SPEC.md`](APPROVED_SPEC.md). Its distribution wording was later narrowed at the owner's direction without changing the implemented product scope.
 
-- Approved Spec SHA-256: `8086030331cf1cfb8f2eae939e2cbca1c7767dd1a5a8c6db21183e6c52ee831e`
+- Approved Spec SHA-256: `39dd5357c55bd5baee57b13d5c2105bba85cc1bcd7130eb79b750a33338e6253`
 - Portal project: `ced2f617-f7eb-4820-ae21-f46d1f6d373c`
 - Approval evidence: the administrator-approved Spec revision supplied for the owner-authorized delivery sequence
 - Pre-implementation baseline: commit `c8a96b7` (`Initialize project`), containing only the project README
@@ -24,7 +24,7 @@ If a proposed change conflicts with or exceeds the approved Spec, stop implement
 From the repository root:
 
 ```sh
-printf '%s' "$(cat docs/APPROVED_SPEC.md)" | shasum -a 256
+shasum -a 256 docs/APPROVED_SPEC.md
 ```
 
-The result must match the approved SHA-256 above. The file intentionally has no trailing newline so its bytes reproduce the administrator-approved revision exactly.
+The result must match the approved SHA-256 above so the current owner-approved revision remains reproducible exactly.

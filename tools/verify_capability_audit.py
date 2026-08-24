@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_SPEC_SHA256 = "8086030331cf1cfb8f2eae939e2cbca1c7767dd1a5a8c6db21183e6c52ee831e"
+EXPECTED_SPEC_SHA256 = "39dd5357c55bd5baee57b13d5c2105bba85cc1bcd7130eb79b750a33338e6253"
 EXPECTED_EXCLUSIONS = {
     "recording",
     "looping",

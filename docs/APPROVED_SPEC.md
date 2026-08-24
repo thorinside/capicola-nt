@@ -10,7 +10,7 @@ Capicola is an upstream real-time time stretcher, pitch shifter, transient detec
 - Primary users: ordinary disting NT owners; the release must not assume software-development expertise.
 - Product owner and release maintainer: the current project owner.
 - Upstream stakeholders: Capicola’s authors and copyright holders.
-- Distribution dependencies: GitHub, NT Gallery, nt_helper, and the normal disting NT installation workflow.
+- Distribution dependencies: GitHub, nt_helper, and the normal disting NT installation workflow.
 - Support is best-effort, without a guaranteed response time.
 
 ## Shared language
@@ -46,7 +46,7 @@ Live mode uses stereo routing, with left-only mono normalized to both channels. 
 Sample references and related state use standard disting NT persistence. Preset restoration and missing-sample behavior follow verified host/SDK behavior. The wrapper does not silently substitute a sample or fall back to live input.
 
 ### D-008 — Ordinary-user distribution
-The release targets ordinary disting NT owners and ships as a version-tagged GitHub release through NT Gallery to nt_helper, using the normal plugin installation workflow. Support is best-effort.
+The release targets ordinary disting NT owners and ships as a version-tagged GitHub release installable with nt_helper or the normal disting NT plugin workflow. Support is best-effort.
 
 ### D-009 — No invented quality gates
 No fixed runtime, CPU percentage, audio suite, dropout count, or similar threshold is a publication gate. Mandatory platform and license requirements still apply.
@@ -67,7 +67,7 @@ The wrapper will be released under the exact same GPL-based license as upstream 
 - Git submodules for vendor code.
 - Same-license release with required notices, attribution, corresponding source, and submodule information.
 - Approved custom UI, build, packaging, documentation, compatibility declaration, and owner-directed release preparation.
-- Tagged GitHub releases distributed through NT Gallery to nt_helper.
+- Tagged GitHub releases installable with nt_helper or the normal disting NT plugin workflow.
 
 ### Out of scope
 - Capabilities absent from Capicola.
@@ -103,7 +103,7 @@ The wrapper will be released under the exact same GPL-based license as upstream 
 - FR-018: Material changes from the approved v2 UI require owner-reviewed reprototyping.
 - FR-019: Store and restore sample state only through standard facilities supported by the verified NT SDK.
 - FR-020: Invalid or unavailable sample behavior follows the supported NT baseline; do not substitute a sample or switch to live input.
-- FR-021: Package public versions as tagged GitHub releases compatible with NT Gallery and nt_helper.
+- FR-021: Package public versions as tagged GitHub releases compatible with nt_helper and the normal disting NT plugin workflow.
 - FR-022: Provide ordinary-user installation, operation, compatibility, known-limit, and troubleshooting documentation.
 
 Exact sample formats and limits, audited labels/ranges, final CV output names/count, and host error presentation must be verified against the selected upstream commit and supported NT baseline during delivery; they are not additional product-owner decisions.
@@ -128,7 +128,7 @@ Operation is local, with no network service, account, analytics, or personal-dat
 - Vendor dependencies linked through pinned Git submodules.
 - Exact firmware, SDK, upstream, and dependency revisions are pinned during delivery.
 - NT host parameter-to-CV mapping, sample selection, persistence, and resource handling.
-- GitHub tags/releases, NT Gallery, and nt_helper.
+- GitHub tags/releases, nt_helper, and the normal disting NT plugin workflow.
 
 ## Quality and operational requirements
 - Release is controlled by the owner’s judgment that the plugin works acceptably.
@@ -144,7 +144,7 @@ Operation is local, with no network service, account, analytics, or personal-dat
 - Some upstream capabilities may need constrained ranges.
 - Source changes must avoid stale audio, overlap, or unsafe gain jumps in ordinary use, subject to owner judgment.
 - NT output limits may constrain simultaneous analysis outputs.
-- NT Gallery or nt_helper rules may change and must be checked for each release.
+- GitHub release or nt_helper installation rules may change and must be checked for each release.
 
 ## Acceptance criteria
 - **AC-001:** The first-release feature set contains no user-facing audio-processing or sampler capability that is absent from the audited upstream Capicola implementation.
@@ -169,7 +169,7 @@ Operation is local, with no network service, account, analytics, or personal-dat
 - **AC-020:** The delivered performance interface matches the owner-approved “Capicola NT single-screen performance UI v2” information hierarchy and interaction model, except for evidence-based corrections to labels or ranges; any material layout or interaction change has a separately approved prototype.
 - **AC-021:** Saving and restoring a preset with a valid sample reference behaves according to the documented disting NT host behavior on the supported platform baseline.
 - **AC-022:** When a saved sample reference is missing, moved, unsupported, or unreadable, observed behavior matches the documented disting NT host behavior; Capicola neither substitutes another sample nor automatically falls back to live input.
-- **AC-023:** A typical disting NT owner can install a version-tagged release through the documented GitHub, NT Gallery, and nt_helper plugin flow without compiling the project.
+- **AC-023:** A typical disting NT owner can install a version-tagged release through the documented nt_helper or manual disting NT plugin flow without compiling the project.
 - **AC-024:** The public release includes documentation for installation, normal operation, the supported firmware/SDK baseline, known limits, troubleshooting, and reproducible issue reporting.
 - **AC-025:** Public release uses the same applicable GPL-based license as upstream Capicola, identifies the project as a wrapper, retains required upstream notices and attribution, and provides the corresponding source and pinned submodule information required by that license.
 
