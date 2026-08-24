@@ -15,6 +15,10 @@ constexpr int kFrames = 64;
 constexpr float kPi = 3.14159265358979323846f;
 float gWorkBuffer[kFrames * 2] = {};
 bool gCardMounted = true;
+uint32_t gNumFolders = 2;
+uint32_t gDrumsSampleCount = 2;
+bool gSampleMetadataSupported = true;
+bool gStreamOpenSucceeds = true;
 uint32_t gStreamRenderCalls = 0;
 uint32_t gStreamOpenCalls = 0;
 uint32_t gFolderInfoCalls = 0;
@@ -70,32 +74,34 @@ extern "C" bool NT_isSdCardMounted() {
 }
 
 extern "C" uint32_t NT_getNumSampleFolders() {
-    return 2;
+    return gNumFolders;
 }
 
 extern "C" void NT_getSampleFolderInfo(uint32_t folder, _NT_wavFolderInfo& info) {
     ++gFolderInfoCalls;
-    if (folder >= 2) {
+    if (folder >= gNumFolders || folder >= 2) {
         gInvalidCatalogLookup = true;
         return;
     }
     static const char* names[] = {"Drums", "Textures"};
     info.name = names[folder];
-    info.numSampleFiles = folder == 0 ? 2 : 1;
+    info.numSampleFiles = folder == 0 ? gDrumsSampleCount : 1;
 }
 
 extern "C" void NT_getSampleFileInfo(uint32_t folder,
                                        uint32_t sample,
                                        _NT_wavInfo& info) {
     ++gFileInfoCalls;
-    if (folder >= 2 || sample >= (folder == 0 ? 2U : 1U)) {
+    if (folder >= gNumFolders || folder >= 2 ||
+        sample >= (folder == 0 ? gDrumsSampleCount : 1U)) {
         gInvalidCatalogLookup = true;
         return;
     }
     static const char* names[] = {"Mono.wav", "Stereo.wav", "Cloud.wav"};
     info.name = folder == 0 ? names[sample] : names[2];
     info.numFrames = 48000;
-    info.sampleRate = folder == 1 ? 24000 : 48000;
+    info.sampleRate = gSampleMetadataSupported
+        ? (folder == 1 ? 24000U : 48000U) : 0U;
     info.channels = sample == 0 ? kNT_WavMono : kNT_WavStereo;
     info.bits = kNT_WavBits16;
 }
@@ -105,7 +111,7 @@ extern "C" bool NT_streamOpen(_NT_stream, const _NT_streamOpenData& data) {
     gOpenedFolder = data.folder;
     gOpenedSample = data.sample;
     gStreamClock = 0;
-    return true;
+    return gStreamOpenSucceeds;
 }
 
 extern "C" uint32_t NT_streamRender(_NT_stream,
@@ -267,6 +273,46 @@ int main() {
     values[quality] = 100;
     values[mix] = 100;
     algorithm->v = values.data();
+
+    // The host persists ordinary parameter values in its preset. Recreate a
+    // fresh instance with those values already restored, including Sample
+    // mode, before the SD catalogue becomes available to the instance. The
+    // first mounted step must reopen that exact valid folder/sample pair.
+    std::vector<std::max_align_t> restoredSram(
+        (requirements.sram + sizeof(std::max_align_t) - 1) /
+        sizeof(std::max_align_t));
+    std::vector<std::max_align_t> restoredDram(
+        (requirements.dram + sizeof(std::max_align_t) - 1) /
+        sizeof(std::max_align_t));
+    std::vector<std::max_align_t> restoredDtc(
+        (requirements.dtc + sizeof(std::max_align_t) - 1) /
+        sizeof(std::max_align_t));
+    _NT_algorithmMemoryPtrs restoredMemory{
+        reinterpret_cast<uint8_t*>(restoredSram.data()),
+        reinterpret_cast<uint8_t*>(restoredDram.data()),
+        reinterpret_cast<uint8_t*>(restoredDtc.data()),
+        nullptr,
+    };
+    _NT_algorithm* restored = factory->construct(
+        restoredMemory, requirements, nullptr);
+    std::vector<int16_t> restoredValues = values;
+    restoredValues[source] = 1;
+    restoredValues[folder] = 0;
+    restoredValues[sample] = 1;
+    restored->v = restoredValues.data();
+    gAlgorithm = restored;
+    factory->parameterChanged(restored, source);
+    factory->parameterChanged(restored, folder);
+    factory->parameterChanged(restored, sample);
+    const uint32_t opensBeforePresetRestore = gStreamOpenCalls;
+    std::vector<float> restoredBuses(kNT_lastBus * kFrames, 0.0f);
+    factory->step(restored, restoredBuses.data(), kFrames / 4);
+    if (gStreamOpenCalls != opensBeforePresetRestore + 1 ||
+        gOpenedFolder != 0 || gOpenedSample != 1 ||
+        gStreamRenderCalls == 0 || restoredValues[source] != 1) {
+        return fail("valid host-persisted sample reference was not restored");
+    }
+    gAlgorithm = algorithm;
 
     const uint32_t requiredPerformanceControls =
         kNT_potL | kNT_potC | kNT_potR |
@@ -594,16 +640,76 @@ int main() {
         }
     }
 
+    // The pinned SDK host lifecycle reapplies the persisted sample selection
+    // when the card catalogue mounts. A valid selection reopens exactly, while
+    // resource failures retain Sample mode and silence rather than substituting
+    // a catalogue entry or falling back to live input.
     const uint32_t opensBeforeRemount = gStreamOpenCalls;
     const uint32_t rendersBeforeRemount = gStreamRenderCalls;
     gCardMounted = false;
     factory->step(algorithm, buses.data(), kFrames / 4);
     gCardMounted = true;
     factory->step(algorithm, buses.data(), kFrames / 4);
-    if (gStreamOpenCalls != opensBeforeRemount ||
-        gStreamRenderCalls != rendersBeforeRemount) {
-        return fail("card remount reopened or rendered before Sample confirmation");
+    if (gStreamOpenCalls != opensBeforeRemount + 1 ||
+        gStreamRenderCalls != rendersBeforeRemount + 1 ||
+        gOpenedFolder != 1 || gOpenedSample != 0) {
+        return fail("valid sample reference did not reopen on card remount");
     }
+
+    // Missing or moved catalogue entry: the saved folder index is no longer
+    // present. No lookup/open is attempted and Sample mode remains selected.
+    gCardMounted = false;
+    factory->step(algorithm, buses.data(), kFrames / 4);
+    gNumFolders = 1;
+    const uint32_t opensBeforeMissing = gStreamOpenCalls;
+    const uint32_t filesBeforeMissing = gFileInfoCalls;
+    gCardMounted = true;
+    factory->step(algorithm, buses.data(), kFrames / 4);
+    if (values[source] != 1 || gStreamOpenCalls != opensBeforeMissing ||
+        gFileInfoCalls != filesBeforeMissing || gInvalidCatalogLookup) {
+        return fail("missing sample reference substituted or fell back to live input");
+    }
+    for (int i = 0; i < kFrames; ++i) {
+        if (buses[12 * kFrames + i] != 0.0f ||
+            buses[13 * kFrames + i] != 0.0f) {
+            return fail("missing sample reference did not keep Sample mode silent");
+        }
+    }
+
+    // Unsupported metadata is rejected before stream open.
+    gNumFolders = 2;
+    values[folder] = 0;
+    values[sample] = 1;
+    gSampleMetadataSupported = false;
+    gCardMounted = false;
+    factory->step(algorithm, buses.data(), kFrames / 4);
+    const uint32_t opensBeforeUnsupported = gStreamOpenCalls;
+    gCardMounted = true;
+    factory->step(algorithm, buses.data(), kFrames / 4);
+    if (values[source] != 1 || gStreamOpenCalls != opensBeforeUnsupported) {
+        return fail("unsupported sample substituted or fell back to live input");
+    }
+
+    // An unreadable resource reaches the host streamer, whose failed open is
+    // authoritative. The wrapper retains Sample mode and renders silence.
+    gSampleMetadataSupported = true;
+    gStreamOpenSucceeds = false;
+    gCardMounted = false;
+    factory->step(algorithm, buses.data(), kFrames / 4);
+    const uint32_t opensBeforeUnreadable = gStreamOpenCalls;
+    gCardMounted = true;
+    factory->step(algorithm, buses.data(), kFrames / 4);
+    if (values[source] != 1 || gStreamOpenCalls != opensBeforeUnreadable + 1 ||
+        gStreamRenderCalls != rendersBeforeRemount + 1) {
+        return fail("unreadable sample substituted, rendered, or fell back to live input");
+    }
+    for (int i = 0; i < kFrames; ++i) {
+        if (buses[12 * kFrames + i] != 0.0f ||
+            buses[13 * kFrames + i] != 0.0f) {
+            return fail("unreadable sample did not keep Sample mode silent");
+        }
+    }
+    gStreamOpenSucceeds = true;
 
     // Invalid catalogue values keep Sample mode silent and never substitute a
     // different folder or file in lookups, display strings, or stream opens.

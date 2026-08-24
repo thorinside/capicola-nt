@@ -418,6 +418,14 @@ void updateCardState(Algorithm* algorithm) {
     NT_updateParameterDefinition(NT_algorithmIndex(algorithm), kParamFolder);
     if (mounted) {
         updateSampleRange(algorithm);
+        // The pinned SDK sample-streamer example re-applies the persisted
+        // Sample parameter when the card catalogue becomes available. Match
+        // that host lifecycle so a Sample-mode preset restores its exact
+        // saved catalogue indices. openSelectedSample() validates both indices
+        // and leaves Sample mode silent if the resource is unavailable.
+        if (algorithm->activeSource == kSourceSample) {
+            openSelectedSample(algorithm);
+        }
     }
 }
 
