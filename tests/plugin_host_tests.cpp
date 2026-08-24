@@ -38,7 +38,12 @@ uint32_t gOpenedFolder = 0;
 uint32_t gOpenedSample = 0;
 _NT_algorithm* gAlgorithm = nullptr;
 const _NT_factory* gFactory = nullptr;
-std::vector<std::string> gDrawnText;
+struct DrawCall {
+    std::string text;
+    int x;
+    _NT_textSize size;
+};
+std::vector<DrawCall> gDrawnText;
 
 int fail(const char* message) {
     std::printf("FAIL: %s\n", message);
@@ -68,8 +73,18 @@ bool pageContains(const _NT_parameterPages* pages, const char* pageName, int par
 }
 
 bool drawnTextContains(const char* fragment) {
-    for (const std::string& text : gDrawnText) {
-        if (text.find(fragment) != std::string::npos) return true;
+    for (const DrawCall& call : gDrawnText) {
+        if (call.text.find(fragment) != std::string::npos) return true;
+    }
+    return false;
+}
+
+bool drawnTextAt(const char* fragment, int x, _NT_textSize size) {
+    for (const DrawCall& call : gDrawnText) {
+        if (call.x == x && call.size == size &&
+            call.text.find(fragment) != std::string::npos) {
+            return true;
+        }
     }
     return false;
 }
@@ -115,7 +130,8 @@ extern "C" void NT_getSampleFileInfo(uint32_t folder,
         return;
     }
     static const char* names[] = {
-        "Mono.wav", "LongSampleName.wav", "Cloud.wav",
+        "Mono.wav", "1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZabcd.wav.WAV",
+        "Cloud.wav",
     };
     info.name = folder == 0 ? names[sample] : names[2];
     info.numFrames = gSampleFrameCount;
@@ -202,8 +218,9 @@ extern "C" void NT_setParameterFromUi(uint32_t, uint32_t parameter, int16_t valu
     }
 }
 
-void NT_drawText(int, int, const char* text, int, _NT_textAlignment, _NT_textSize) {
-    gDrawnText.emplace_back(text == nullptr ? "" : text);
+void NT_drawText(int x, int, const char* text, int,
+                 _NT_textAlignment, _NT_textSize size) {
+    gDrawnText.push_back({text == nullptr ? "" : text, x, size});
 }
 
 int main() {
@@ -702,7 +719,8 @@ int main() {
     factory->draw(algorithm);
     if (gStreamOpenCalls != opensBeforeSampleSource + 1 ||
         !drawnTextContains("SELECT SAMPLE") ||
-        !drawnTextContains("LongSampleName.wav") ||
+        !drawnTextContains(
+            "1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZabcd.wav.WAV") ||
         !drawnTextContains("PRESS: LOAD")) {
         return fail("folder confirmation did not open temporary sample selection");
     }
@@ -713,14 +731,18 @@ int main() {
     factory->draw(algorithm);
     if (gStreamOpenCalls != opensBeforeSampleSource + 2 ||
         gSampleReadCalls != readsBeforeSampleSource ||
-        !drawnTextContains("CAPICOLA  LongS...Name")) {
+        !drawnTextContains("CAPICOLA") ||
+        !drawnTextAt("1234567890ABCDEF...RSTUVWXYZabcd",
+                     72, kNT_textTiny) ||
+        drawnTextContains(".wav") || drawnTextContains(".WAV")) {
         return fail("sample LOAD did not restart the compactly titled stream");
     }
     const uint32_t folderCallsBeforeSampleTitle = gFolderInfoCalls;
     const uint32_t fileCallsBeforeSampleTitle = gFileInfoCalls;
     gDrawnText.clear();
     factory->draw(algorithm);
-    if (!drawnTextContains("CAPICOLA  LongS...Name") ||
+    if (!drawnTextContains("CAPICOLA") ||
+        !drawnTextContains("1234567890ABCDEF...RSTUVWXYZabcd") ||
         gFolderInfoCalls != folderCallsBeforeSampleTitle ||
         gFileInfoCalls != fileCallsBeforeSampleTitle) {
         return fail("streamed sample did not retain its compact title");
@@ -730,6 +752,13 @@ int main() {
             _NT_uiData loadUi{};
             loadUi.controls = kNT_encoderButtonL;
             factory->customUi(algorithm, loadUi);
+        }
+    };
+    auto settleSampleTransition = [&]() {
+        // Each replacement uses a 5 ms (240-frame) fade-out and a matching
+        // fade-in. Eight 64-frame blocks cover both phases at 48 kHz.
+        for (int block = 0; block < 8; ++block) {
+            factory->step(algorithm, buses.data(), kFrames / 4);
         }
     };
 
@@ -747,7 +776,8 @@ int main() {
     }
     gDrawnText.clear();
     factory->draw(algorithm);
-    if (!drawnTextContains("CAPICOLA  LongS...Name")) {
+    if (!drawnTextContains("CAPICOLA") ||
+        !drawnTextContains("1234567890ABCDEF...RSTUVWXYZabcd")) {
         return fail("replacement stream did not title the playing sample");
     }
 
@@ -824,6 +854,7 @@ int main() {
     for (int control : secondaryControls) values[control] = algorithm->parameters[control].def;
     values[feedback] = algorithm->parameters[feedback].def;
     pressSampleLoad();
+    settleSampleTransition();
 
     // Simulate the host's ordinary parameter-to-CV mapping by replacing the
     // effective Mix value in v[] between audio callbacks. Mapping is host-owned,
@@ -887,8 +918,11 @@ int main() {
         return fail("host-mapped Mix value did not modulate Capicola processing");
     }
 
-    // A folder change updates the Sample range and immediately loads the
-    // selected valid entry from that folder.
+    // A folder change opens the new stream outside step(). The audio path then
+    // spends 5 ms fading the old output to silence without advancing the new
+    // stream, followed by a 5 ms fade-in from the new sample's frame zero.
+    const float previousLeft = buses[12 * kFrames + kFrames - 1];
+    const float previousRight = buses[13 * kFrames + kFrames - 1];
     const uint32_t opensBeforeFolderChange = gStreamOpenCalls;
     const uint32_t rendersBeforeFolderChange = gStreamRenderCalls;
     values[folder] = 1;
@@ -898,14 +932,64 @@ int main() {
         gStreamRenderCalls != rendersBeforeFolderChange ||
         values[sample] != 0 ||
         gOpenedFolder != 1 || gOpenedSample != 0) {
-        return fail("folder change did not synchronize and load its valid sample");
+        return fail("folder change did not synchronize and open its valid sample");
     }
     values[mix] = 0;
+    constexpr int kSampleFadeFrames = 240;
+    for (int block = 0; block < 4; ++block) {
+        factory->step(algorithm, buses.data(), kFrames / 4);
+        if (gStreamRenderCalls != rendersBeforeFolderChange) {
+            return fail("replacement stream advanced during its fade-out");
+        }
+        for (int i = 0; i < kFrames; ++i) {
+            const int transitionFrame = block * kFrames + i;
+            const float gain = transitionFrame < kSampleFadeFrames
+                ? static_cast<float>(kSampleFadeFrames - transitionFrame - 1) /
+                    static_cast<float>(kSampleFadeFrames)
+                : 0.0f;
+            if (std::fabs(buses[12 * kFrames + i] - previousLeft * gain) >
+                    1.0e-5f ||
+                std::fabs(buses[13 * kFrames + i] - previousRight * gain) >
+                    1.0e-5f) {
+                return fail("sample replacement did not fade the old output to silence");
+            }
+        }
+    }
+    for (int block = 0; block < 4; ++block) {
+        factory->step(algorithm, buses.data(), kFrames / 4);
+        if (gStreamRenderCalls != rendersBeforeFolderChange +
+                static_cast<uint32_t>(block + 1)) {
+            return fail("replacement stream did not begin after its fade-out");
+        }
+        for (int i = 0; i < kFrames; ++i) {
+            const int transitionFrame = block * kFrames + i;
+            const float position = static_cast<float>(transitionFrame) * 0.5f;
+            const uint32_t index = static_cast<uint32_t>(position);
+            const float fraction = position - static_cast<float>(index);
+            const float source0 = std::sin(
+                2.0f * kPi * 330.0f * static_cast<float>(index) / 24000.0f);
+            const float source1 = std::sin(
+                2.0f * kPi * 330.0f * static_cast<float>(index + 1U) /
+                24000.0f);
+            const float fadeGain = transitionFrame < kSampleFadeFrames
+                ? static_cast<float>(transitionFrame + 1) /
+                    static_cast<float>(kSampleFadeFrames)
+                : 1.0f;
+            const float expected = 8.0f *
+                (source0 + fraction * (source1 - source0)) * fadeGain;
+            if (std::fabs(buses[12 * kFrames + i] - expected) > 1.0e-5f ||
+                buses[12 * kFrames + i] != buses[13 * kFrames + i]) {
+                return fail("new sample did not fade in from its first frame");
+            }
+        }
+    }
+
+    const float sourcePosition = gStreamSourcePosition;
     factory->step(algorithm, buses.data(), kFrames / 4);
     const float* monoLeft = buses.data() + 12 * kFrames;
     const float* monoRight = buses.data() + 13 * kFrames;
     for (int i = 0; i < kFrames; ++i) {
-        const float position = static_cast<float>(i) * 0.5f;
+        const float position = sourcePosition + static_cast<float>(i) * 0.5f;
         const uint32_t index = static_cast<uint32_t>(position);
         const float fraction = position - static_cast<float>(index);
         const float source0 = std::sin(
@@ -920,7 +1004,6 @@ int main() {
         }
     }
     values[mix] = 100;
-    pressSampleLoad();
 
     // Sample mode has no transport trigger. A short stream proves that the
     // end reopens once, fills the rest of the block from the start, and keeps
@@ -930,13 +1013,9 @@ int main() {
     values[sample] = 0;
     factory->parameterChanged(algorithm, folder);
     values[mix] = 0;
+    settleSampleTransition();
     const uint32_t opensBeforeLoopStep = gStreamOpenCalls;
     const uint32_t rendersBeforeLoopStep = gStreamRenderCalls;
-    factory->step(algorithm, buses.data(), kFrames / 4);
-    if (gStreamOpenCalls != opensBeforeLoopStep ||
-        gStreamRenderCalls != rendersBeforeLoopStep + 1) {
-        return fail("stream restarted before reaching the sample boundary");
-    }
     factory->step(algorithm, buses.data(), kFrames / 4);
     for (int i = 0; i < kFrames; ++i) {
         const uint32_t sourceIndex = i < 32
@@ -952,14 +1031,16 @@ int main() {
     gDrawnText.clear();
     factory->draw(algorithm);
     if (gStreamOpenCalls != opensBeforeLoopStep + 1 ||
-        gStreamRenderCalls != rendersBeforeLoopStep + 3 ||
-        !drawnTextContains("CAPICOLA  Mono")) {
+        gStreamRenderCalls != rendersBeforeLoopStep + 2 ||
+        !drawnTextContains("CAPICOLA") ||
+        !drawnTextContains("Mono")) {
         return fail("sample stream loop or compact title was not retained");
     }
     gSampleFrameCount = 48000;
     values[folder] = 1;
     factory->parameterChanged(algorithm, folder);
     values[mix] = 100;
+    settleSampleTransition();
 
     // Streaming is the only allowed SD operation in step(). A temporary host
     // underrun drops the affected block, performs no catalogue work, and
@@ -993,10 +1074,11 @@ int main() {
     pressSampleLoad();
     factory->step(algorithm, buses.data(), kFrames / 4);
     if (gStreamOpenCalls != opensBeforeRemount + 1 ||
-        gStreamRenderCalls != rendersBeforeRemount + 3 ||
+        gStreamRenderCalls != rendersBeforeRemount + 2 ||
         gOpenedFolder != 1 || gOpenedSample != 0) {
         return fail("explicit sample LOAD did not recover after remount");
     }
+    settleSampleTransition();
 
     // Missing or moved catalogue entry: the saved folder index is no longer
     // present. Explicit LOAD performs no invalid lookup/open and Sample
@@ -1009,7 +1091,7 @@ int main() {
     gCardMounted = true;
     factory->step(algorithm, buses.data(), kFrames / 4);
     pressSampleLoad();
-    factory->step(algorithm, buses.data(), kFrames / 4);
+    settleSampleTransition();
     if (values[source] != 1 || gStreamOpenCalls != opensBeforeMissing ||
         gFileInfoCalls != filesBeforeMissing || gInvalidCatalogLookup) {
         return fail("missing sample reference substituted or fell back to live input");
@@ -1107,7 +1189,7 @@ int main() {
         gOpenedFolder != 0 || gOpenedSample != 0 || gInvalidCatalogLookup) {
         return fail("Sample value was not synchronized to the folder range");
     }
-    factory->step(algorithm, buses.data(), kFrames / 4);
+    settleSampleTransition();
     double synchronizedSampleEnergy = 0.0;
     for (int i = 0; i < kFrames; ++i) {
         synchronizedSampleEnergy += std::fabs(buses[12 * kFrames + i]) +
@@ -1117,7 +1199,7 @@ int main() {
         return fail("range-synchronized Sample value did not play");
     }
 
-    // Switching back to live resets Capicola and cannot invoke the legacy
+    // Switching back to live resets Capicola and cannot invoke the sample
     // stream renderer.
     const uint32_t rendersBeforeLive = gStreamRenderCalls;
     values[source] = 0;
@@ -1134,7 +1216,7 @@ int main() {
         factory->step(algorithm, buses.data(), kFrames / 4);
     }
     if (gStreamRenderCalls != rendersBeforeLive) {
-        return fail("live mode invoked the legacy sample stream renderer");
+        return fail("live mode invoked the sample stream renderer");
     }
     double liveDifference = 0.0;
     const float* outLeft = buses.data() + 12 * kFrames;

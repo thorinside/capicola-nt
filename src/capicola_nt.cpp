@@ -69,6 +69,12 @@ enum UiView {
     kUiSampleSelection,
 };
 
+enum SampleTransitionPhase {
+    kSampleTransitionNone,
+    kSampleTransitionFadeOut,
+    kSampleTransitionFadeIn,
+};
+
 static const char* const kSourceNames[] = {"Live", "Sample"};
 
 static const _NT_parameter kParameterTemplate[] = {
@@ -190,6 +196,12 @@ struct Algorithm : public _NT_algorithm {
     bool processorFaulted;
     float lastOutputLeft;
     float lastOutputRight;
+    SampleTransitionPhase sampleTransitionPhase;
+    bool sampleTransitionFadeInPending;
+    uint32_t sampleTransitionFrame;
+    uint32_t sampleTransitionFrames;
+    float sampleTransitionStartLeft;
+    float sampleTransitionStartRight;
 };
 
 void calculateRequirements(_NT_algorithmRequirements& requirements,
@@ -213,12 +225,19 @@ uint8_t* alignPointer(uint8_t* pointer, std::size_t alignment) {
     return reinterpret_cast<uint8_t*>((address + mask) & ~mask);
 }
 
-void resetProcessor(Algorithm* algorithm) {
+void resetProcessor(Algorithm* algorithm, bool clearOutputState = true) {
     algorithm->processor->init();
     algorithm->processingControlsApplied = false;
     algorithm->processorFaulted = false;
-    algorithm->lastOutputLeft = 0.0f;
-    algorithm->lastOutputRight = 0.0f;
+    if (clearOutputState) {
+        algorithm->lastOutputLeft = 0.0f;
+        algorithm->lastOutputRight = 0.0f;
+        algorithm->sampleTransitionPhase = kSampleTransitionNone;
+        algorithm->sampleTransitionFadeInPending = false;
+        algorithm->sampleTransitionFrame = 0U;
+        algorithm->sampleTransitionStartLeft = 0.0f;
+        algorithm->sampleTransitionStartRight = 0.0f;
+    }
 }
 
 _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& memory,
@@ -261,6 +280,10 @@ _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& memory,
     algorithm->uiView = kUiPerformance;
     algorithm->alternateControls = false;
     algorithm->pendingUiValueMask = 0U;
+    algorithm->sampleTransitionFrames = NT_globals.sampleRate / 200U;
+    if (algorithm->sampleTransitionFrames == 0U) {
+        algorithm->sampleTransitionFrames = 1U;
+    }
 
     const uint32_t folderCount = algorithm->cardMounted
         ? NT_getNumSampleFolders() : 0;
@@ -422,6 +445,36 @@ void invalidateSamplePlayback(Algorithm* algorithm) {
     algorithm->samplePlaying = false;
 }
 
+void beginSampleTransition(Algorithm* algorithm,
+                           bool fadeOutFirst,
+                           bool fadeInAfter,
+                           float oldLeft,
+                           float oldRight) {
+    algorithm->sampleTransitionFrame = 0U;
+    algorithm->sampleTransitionFadeInPending = fadeInAfter;
+    algorithm->sampleTransitionStartLeft = std::isfinite(oldLeft)
+        ? oldLeft : 0.0f;
+    algorithm->sampleTransitionStartRight = std::isfinite(oldRight)
+        ? oldRight : 0.0f;
+    if (fadeOutFirst) {
+        algorithm->sampleTransitionPhase = kSampleTransitionFadeOut;
+    } else if (fadeInAfter) {
+        algorithm->sampleTransitionPhase = kSampleTransitionFadeIn;
+    } else {
+        algorithm->sampleTransitionPhase = kSampleTransitionNone;
+    }
+}
+
+void stopSamplePlayback(Algorithm* algorithm) {
+    const bool fadeOutFirst = algorithm->samplePlaying ||
+        algorithm->sampleTransitionPhase != kSampleTransitionNone;
+    const float oldLeft = algorithm->lastOutputLeft;
+    const float oldRight = algorithm->lastOutputRight;
+    invalidateSamplePlayback(algorithm);
+    resetProcessor(algorithm, false);
+    beginSampleTransition(algorithm, fadeOutFirst, false, oldLeft, oldRight);
+}
+
 bool openSampleStream(Algorithm* algorithm, const SampleStreamSpec& spec) {
     const _NT_streamOpenData data = {
         .streamBuffer = algorithm->streamBuffer,
@@ -459,8 +512,7 @@ bool refreshCatalog(Algorithm* algorithm) {
     const bool mounted = NT_isSdCardMounted();
     if (mounted != algorithm->cardMounted) {
         algorithm->cardMounted = mounted;
-        invalidateSamplePlayback(algorithm);
-        resetProcessor(algorithm);
+        stopSamplePlayback(algorithm);
     }
 
     const uint32_t folderCount = mounted ? NT_getNumSampleFolders() : 0;
@@ -486,8 +538,7 @@ void openSelectedSample(Algorithm* algorithm, bool forceReload = false) {
     const uint32_t folderCount = NT_getNumSampleFolders();
     uint32_t folder = 0;
     if (!catalogIndex(algorithm->v[kParamFolder], folderCount, folder)) {
-        invalidateSamplePlayback(algorithm);
-        resetProcessor(algorithm);
+        stopSamplePlayback(algorithm);
         return;
     }
     _NT_wavFolderInfo folderInfo{};
@@ -496,16 +547,14 @@ void openSelectedSample(Algorithm* algorithm, bool forceReload = false) {
     if (!catalogIndex(algorithm->v[kParamSample],
                       folderInfo.numSampleFiles,
                       sample)) {
-        invalidateSamplePlayback(algorithm);
-        resetProcessor(algorithm);
+        stopSamplePlayback(algorithm);
         return;
     }
     _NT_wavInfo info{};
     NT_getSampleFileInfo(folder, sample, info);
     if (info.numFrames == 0 || info.sampleRate == 0 ||
         NT_globals.sampleRate == 0) {
-        invalidateSamplePlayback(algorithm);
-        resetProcessor(algorithm);
+        stopSamplePlayback(algorithm);
         return;
     }
 
@@ -516,9 +565,15 @@ void openSelectedSample(Algorithm* algorithm, bool forceReload = false) {
         return;
     }
 
-    // A new or failed selection replaces the previous stream immediately.
+    // Open the replacement outside step(), but retain the last output value so
+    // the audio path can make a bounded fade-out before consuming the new
+    // stream from frame zero, followed by a fade-in.
+    const bool fadeOutFirst = algorithm->samplePlaying ||
+        algorithm->sampleTransitionPhase != kSampleTransitionNone;
+    const float oldLeft = algorithm->lastOutputLeft;
+    const float oldRight = algorithm->lastOutputRight;
     invalidateSamplePlayback(algorithm);
-    resetProcessor(algorithm);
+    resetProcessor(algorithm, false);
 
     SampleStreamSpec spec{};
     spec.folder = folder;
@@ -528,7 +583,8 @@ void openSelectedSample(Algorithm* algorithm, bool forceReload = false) {
     std::strncpy(spec.name, info.name == nullptr ? "Sample" : info.name,
                  sizeof(spec.name) - 1U);
     spec.name[sizeof(spec.name) - 1U] = '\0';
-    openSampleStream(algorithm, spec);
+    const bool opened = openSampleStream(algorithm, spec);
+    beginSampleTransition(algorithm, fadeOutFirst, opened, oldLeft, oldRight);
 }
 
 void selectSource(Algorithm* algorithm, SourceMode source) {
@@ -579,7 +635,7 @@ void parameterChanged(_NT_algorithm* base, int parameter) {
             if (!refreshCatalog(algorithm)) {
                 // Preset restoration can notify Source, Folder, and Sample in
                 // sequence after all values are already present in v[]. The
-                // Source callback may therefore have loaded this exact file.
+                // Source callback may therefore have opened this exact file.
                 // Deduplicate ordinary host notifications; the sample
                 // selector's explicit LOAD action retains its forced-reload
                 // path below.
@@ -770,6 +826,51 @@ uint32_t renderStreamedSample(Algorithm* algorithm, int frames) {
     return total;
 }
 
+void renderSampleFadeOut(Algorithm* algorithm, int frames) {
+    std::memset(algorithm->scratchLeft, 0,
+                static_cast<std::size_t>(frames) * sizeof(float));
+    std::memset(algorithm->scratchRight, 0,
+                static_cast<std::size_t>(frames) * sizeof(float));
+    const float reciprocal = 1.0f /
+        static_cast<float>(algorithm->sampleTransitionFrames);
+    int i = 0;
+    for (; i < frames &&
+           algorithm->sampleTransitionFrame < algorithm->sampleTransitionFrames;
+         ++i, ++algorithm->sampleTransitionFrame) {
+        const uint32_t remaining = algorithm->sampleTransitionFrames -
+            algorithm->sampleTransitionFrame - 1U;
+        const float gain = static_cast<float>(remaining) * reciprocal;
+        algorithm->scratchLeft[i] = algorithm->sampleTransitionStartLeft * gain;
+        algorithm->scratchRight[i] = algorithm->sampleTransitionStartRight * gain;
+    }
+    if (algorithm->sampleTransitionFrame >=
+        algorithm->sampleTransitionFrames) {
+        algorithm->sampleTransitionFrame = 0U;
+        algorithm->sampleTransitionPhase =
+            algorithm->sampleTransitionFadeInPending
+                ? kSampleTransitionFadeIn : kSampleTransitionNone;
+        algorithm->sampleTransitionFadeInPending = false;
+    }
+}
+
+void applySampleFadeIn(Algorithm* algorithm, int frames) {
+    const float reciprocal = 1.0f /
+        static_cast<float>(algorithm->sampleTransitionFrames);
+    for (int i = 0; i < frames &&
+         algorithm->sampleTransitionFrame < algorithm->sampleTransitionFrames;
+         ++i, ++algorithm->sampleTransitionFrame) {
+        const float gain = static_cast<float>(
+            algorithm->sampleTransitionFrame + 1U) * reciprocal;
+        algorithm->scratchLeft[i] *= gain;
+        algorithm->scratchRight[i] *= gain;
+    }
+    if (algorithm->sampleTransitionFrame >=
+        algorithm->sampleTransitionFrames) {
+        algorithm->sampleTransitionFrame = 0U;
+        algorithm->sampleTransitionPhase = kSampleTransitionNone;
+    }
+}
+
 void step(_NT_algorithm* base, float* busFrames, int numFramesBy4) {
     Algorithm* algorithm = static_cast<Algorithm*>(base);
     const int frames = numFramesBy4 * 4;
@@ -784,10 +885,15 @@ void step(_NT_algorithm* base, float* busFrames, int numFramesBy4) {
     // the same confirmed Capicola control surface.
     applyProcessingControls(algorithm);
 
+    const bool sampleFadingOut = algorithm->activeSource == kSourceSample &&
+        algorithm->sampleTransitionPhase == kSampleTransitionFadeOut;
     const float* left = nullptr;
     const float* right = nullptr;
-    bool sourceAvailable = true;
-    if (algorithm->activeSource == kSourceLive) {
+    bool sourceAvailable = !sampleFadingOut;
+    if (sampleFadingOut) {
+        // The replacement stream is already open, but remains at frame zero
+        // until the old output has reached silence.
+    } else if (algorithm->activeSource == kSourceLive) {
         const int leftInputBus = algorithm->v[kParamLeftInput];
         const int rightInputBus = algorithm->v[kParamRightInput];
         const float* rawLeft = busFrames + (leftInputBus - 1) * frames;
@@ -824,9 +930,15 @@ void step(_NT_algorithm* base, float* busFrames, int numFramesBy4) {
             algorithm->processorFaulted = true;
         }
     }
-    if (!rendered) {
+    if (sampleFadingOut) {
+        renderSampleFadeOut(algorithm, frames);
+        rendered = false;
+    } else if (!rendered) {
         fadeToSilence(algorithm->scratchLeft, algorithm->scratchRight, frames,
                       algorithm->lastOutputLeft, algorithm->lastOutputRight);
+    } else if (algorithm->activeSource == kSourceSample &&
+               algorithm->sampleTransitionPhase == kSampleTransitionFadeIn) {
+        applySampleFadeIn(algorithm, frames);
     }
     algorithm->lastOutputLeft = algorithm->scratchLeft[frames - 1];
     algorithm->lastOutputRight = algorithm->scratchRight[frames - 1];
@@ -894,9 +1006,9 @@ void copyLiteral(char* destination, std::size_t size, const char (&source)[N]) {
 
 void compactSampleName(const char* filename, char* destination,
                        std::size_t size) {
-    constexpr std::size_t kVisibleCharacters = 12U;
-    constexpr std::size_t kLeadingCharacters = 5U;
-    constexpr std::size_t kTrailingCharacters = 4U;
+    constexpr std::size_t kVisibleCharacters = 32U;
+    constexpr std::size_t kLeadingCharacters = 16U;
+    constexpr std::size_t kTrailingCharacters = 13U;
     if (size == 0U) return;
     destination[0] = '\0';
     if (filename == nullptr || filename[0] == '\0') {
@@ -904,12 +1016,36 @@ void compactSampleName(const char* filename, char* destination,
         return;
     }
 
-    const std::size_t filenameLength = std::strlen(filename);
-    std::size_t stemLength = filenameLength;
-    for (std::size_t i = filenameLength; i > 0U; --i) {
-        if (filename[i - 1U] == '.') {
-            if (i > 1U) stemLength = i - 1U;
-            break;
+    std::size_t stemLength = std::strlen(filename);
+    static const char* const kAudioExtensions[] = {
+        "wav", "wave", "aif", "aiff", "flac", "mp3",
+    };
+    bool stripped = true;
+    while (stripped) {
+        stripped = false;
+        for (const char* extension : kAudioExtensions) {
+            const std::size_t extensionLength = std::strlen(extension);
+            if (stemLength <= extensionLength + 1U ||
+                filename[stemLength - extensionLength - 1U] != '.') {
+                continue;
+            }
+            bool matches = true;
+            for (std::size_t i = 0U; i < extensionLength; ++i) {
+                char character = filename[
+                    stemLength - extensionLength + i];
+                if (character >= 'A' && character <= 'Z') {
+                    character = static_cast<char>(character - 'A' + 'a');
+                }
+                if (character != extension[i]) {
+                    matches = false;
+                    break;
+                }
+            }
+            if (matches) {
+                stemLength -= extensionLength + 1U;
+                stripped = true;
+                break;
+            }
         }
     }
 
@@ -933,12 +1069,6 @@ void compactSampleName(const char* filename, char* destination,
         ? compactLength : size - 1U;
     std::memcpy(destination, compact, copyLength);
     destination[copyLength] = '\0';
-}
-
-void formatSampleTitle(char* text, std::size_t size, const char* filename) {
-    char sample[13] = {};
-    compactSampleName(filename, sample, sizeof(sample));
-    std::snprintf(text, size, "CAPICOLA  %s", sample);
 }
 
 int32_t displayedValue(const Algorithm* algorithm, int parameter) {
@@ -989,13 +1119,18 @@ bool draw(_NT_algorithm* base) {
     const bool sampleMode = algorithm->v[kParamSource] == kSourceSample;
     if (!sampleMode) {
         copyLiteral(text, sizeof(text), "CAPICOLA   LIVE");
+        NT_drawText(0, 10, text);
     } else if (algorithm->samplePlaying &&
                algorithm->streamedSampleName[0] != '\0') {
-        formatSampleTitle(text, sizeof(text), algorithm->streamedSampleName);
+        NT_drawText(0, 10, "CAPICOLA");
+        char sample[33] = {};
+        compactSampleName(algorithm->streamedSampleName,
+                          sample, sizeof(sample));
+        NT_drawText(72, 10, sample, 15, kNT_textLeft, kNT_textTiny);
     } else {
         copyLiteral(text, sizeof(text), "CAPICOLA   WAIT");
+        NT_drawText(0, 10, text);
     }
-    NT_drawText(0, 10, text);
 
     const int params[2][3] = {
         {kParamStretch, kParamThreshold, kParamFeedback},

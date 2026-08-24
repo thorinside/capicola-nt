@@ -90,8 +90,8 @@ The title line always keeps the plug-in identity visible:
 
 - **CAPICOLA LIVE** — the selected input buses are being processed.
 - **CAPICOLA _name_** — that sample is streaming and looping. The display
-  removes the final file extension and shortens names longer than 12 characters
-  with a middle ellipsis.
+  removes repeated trailing audio file extensions and shortens names longer
+  than 32 characters with a middle ellipsis.
 - **CAPICOLA WAIT** — Sample mode is selected, but no stream is available.
 
 ## Select and play a sample
@@ -117,6 +117,11 @@ feed both channels; stereo samples keep their left/right order. Capicola streams
 the full file instead of copying it into a large memory buffer. Use a
 loop-prepared file when the wrap point needs to be seamless; Capicola does not
 edit loop points or add a boundary crossfade.
+
+When a different sample is opened, Capicola fades the current output to silence
+over 5 ms, starts the replacement stream at its first frame, and fades it in
+over 5 ms. This fixed click-safety transition is separate from the **Fade**
+processing control.
 
 The Source, Folder, and Sample selections are ordinary NT preset parameters.
 Keep the SD sample catalogue stable when a preset depends on a sample. If the

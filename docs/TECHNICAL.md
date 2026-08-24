@@ -54,12 +54,20 @@ catalogue refresh and explicit recovery wait for a parameter/UI event.
 The custom UI owns three pressable pots and two pressable encoders. Its two
 labelled pot banks and temporary folder/sample selector are documented in the
 [user guide](../README.md). The title always retains **CAPICOLA** and follows it
-with a sample stem limited to 12 characters using a middle ellipsis. The footer
-contains only Mix, with analysis activity left to the optional CV outputs.
-Stretch retains the upstream taper but is rendered as a time factor or
-**FREEZE**. Pot-originated values are mirrored immediately for display while
-the host commits the parameter update. All twelve continuous processing
-controls remain ordinary host parameters on the Performance page.
+with a sample stem limited to 32 characters using a middle ellipsis; repeated
+trailing audio extensions are removed. The footer contains only Mix, with
+analysis activity left to the optional CV outputs. Stretch retains the upstream
+taper but is rendered as a time factor or **FREEZE**. Pot-originated values are
+mirrored immediately for display while the host commits the parameter update.
+All twelve continuous processing controls remain ordinary host parameters on
+the Performance page.
+
+Replacing or explicitly reopening a sample starts a fixed two-phase safety
+transition. The old output value ramps to silence over 5 ms while the newly
+opened stream remains at frame zero; the new processed stream then ramps to
+unity over 5 ms. The counters and held stereo values live in the instance, and
+the per-sample work is bounded. This transition does not alter the user-facing
+**Fade** processing parameter.
 
 ## Pinned source and platform
 
