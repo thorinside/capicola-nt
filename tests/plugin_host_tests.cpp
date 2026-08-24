@@ -384,7 +384,7 @@ int main() {
         restoredEnergy += std::fabs(restoredBuses[12 * kFrames + i]) +
                           std::fabs(restoredBuses[13 * kFrames + i]);
     }
-    if (gStreamOpenCalls != opensBeforePresetRestore + 1 ||
+    if (gStreamOpenCalls != opensBeforePresetRestore + 2 ||
         gOpenedFolder != 0 || gOpenedSample != 1 ||
         restoredEnergy == 0.0 || restoredValues[source] != 1 ||
         gFolderInfoCalls != folderCallsBeforeRestoredStep ||
@@ -663,15 +663,17 @@ int main() {
     ui = {};
     ui.encoders[0] = 1;
     factory->customUi(algorithm, ui);
-    if (values[source] != 1 || gStreamOpenCalls != opensBeforeSampleSource) {
-        return fail("performance UI did not select Sample mode without opening early");
+    if (values[source] != 1 ||
+        gStreamOpenCalls != opensBeforeSampleSource + 1 ||
+        gOpenedFolder != 0 || gOpenedSample != 1) {
+        return fail("entering Sample mode did not load the selected sample");
     }
     ui = {};
     ui.controls = kNT_encoderButtonL;
     factory->customUi(algorithm, ui);
     gDrawnText.clear();
     factory->draw(algorithm);
-    if (gStreamOpenCalls != opensBeforeSampleSource ||
+    if (gStreamOpenCalls != opensBeforeSampleSource + 1 ||
         !drawnTextContains("SELECT FOLDER") || !drawnTextContains("Drums") ||
         !drawnTextContains("PRESS: NEXT")) {
         return fail("sample loading did not open the temporary folder selection");
@@ -681,7 +683,7 @@ int main() {
     factory->customUi(algorithm, ui);
     gDrawnText.clear();
     factory->draw(algorithm);
-    if (gStreamOpenCalls != opensBeforeSampleSource ||
+    if (gStreamOpenCalls != opensBeforeSampleSource + 1 ||
         !drawnTextContains("SELECT SAMPLE") ||
         !drawnTextContains("Stereo.wav") || !drawnTextContains("PRESS: LOAD")) {
         return fail("folder confirmation did not open temporary sample selection");
@@ -692,7 +694,7 @@ int main() {
     factory->customUi(algorithm, ui);
     gDrawnText.clear();
     factory->draw(algorithm);
-    if (gStreamOpenCalls != opensBeforeSampleSource + 1 ||
+    if (gStreamOpenCalls != opensBeforeSampleSource + 2 ||
         gDeferredSampleRequest == nullptr ||
         !drawnTextContains("CAPICOLA   SAMPLE LOAD")) {
         return fail("sample confirmation did not enter asynchronous loading");
@@ -870,22 +872,18 @@ int main() {
         return fail("host-mapped Mix value did not modulate Capicola processing");
     }
 
-    // A folder change updates the Sample range and invalidates old playback,
-    // but only explicit Sample confirmation may read the new resource.
+    // A folder change updates the Sample range and immediately loads the
+    // selected valid entry from that folder.
     const uint32_t opensBeforeFolderChange = gStreamOpenCalls;
     const uint32_t rendersBeforeFolderChange = gStreamRenderCalls;
     values[folder] = 1;
-    values[sample] = 0;
+    values[sample] = 1;
     factory->parameterChanged(algorithm, folder);
-    factory->step(algorithm, buses.data(), kFrames / 4);
-    if (gStreamOpenCalls != opensBeforeFolderChange ||
-        gStreamRenderCalls != rendersBeforeFolderChange) {
-        return fail("folder change opened or rendered before Sample confirmation");
-    }
-    factory->parameterChanged(algorithm, sample);
     if (gStreamOpenCalls != opensBeforeFolderChange + 1 ||
+        gStreamRenderCalls != rendersBeforeFolderChange ||
+        values[sample] != 0 ||
         gOpenedFolder != 1 || gOpenedSample != 0) {
-        return fail("Sample confirmation did not open the selected folder resource");
+        return fail("folder change did not synchronize and load its valid sample");
     }
     values[mix] = 0;
     factory->step(algorithm, buses.data(), kFrames / 4);
@@ -908,6 +906,36 @@ int main() {
     }
     values[mix] = 100;
     factory->parameterChanged(algorithm, sample);
+
+    // Sample mode has no transport trigger, so a loaded buffer loops without
+    // any further host read. A deliberately tiny buffer proves multiple wraps
+    // inside one audio block and keeps the source state at SAMPLE PLAY.
+    gSampleFrameCount = 5;
+    values[folder] = 0;
+    values[sample] = 0;
+    factory->parameterChanged(algorithm, folder);
+    values[mix] = 0;
+    const uint32_t readsBeforeLoopStep = gStreamOpenCalls;
+    factory->step(algorithm, buses.data(), kFrames / 4);
+    for (int i = 0; i < kFrames; ++i) {
+        const uint32_t sourceIndex = static_cast<uint32_t>(i) % 5U;
+        const float expected = 8.0f * std::sin(
+            2.0f * kPi * 330.0f * static_cast<float>(sourceIndex) / 48000.0f);
+        if (std::fabs(buses[12 * kFrames + i] - expected) > 1.0e-6f ||
+            buses[12 * kFrames + i] != buses[13 * kFrames + i]) {
+            return fail("loaded sample did not loop from memory at its boundary");
+        }
+    }
+    gDrawnText.clear();
+    factory->draw(algorithm);
+    if (gStreamOpenCalls != readsBeforeLoopStep ||
+        !drawnTextContains("CAPICOLA   SAMPLE PLAY")) {
+        return fail("sample loop stopped or read the SD card from the audio step");
+    }
+    gSampleFrameCount = 48000;
+    values[folder] = 1;
+    factory->parameterChanged(algorithm, folder);
+    values[mix] = 100;
 
     // Once the asynchronous read completes, playback is entirely memory-backed.
     // Card state changes therefore cannot trigger catalogue work or reads in
@@ -1041,23 +1069,28 @@ int main() {
     factory->parameterChanged(algorithm, folder);
     const uint32_t opensBeforeInvalidSample = gStreamOpenCalls;
     const uint32_t filesBeforeInvalidSample = gFileInfoCalls;
+    // Once the folder is valid, externally supplied Sample values are
+    // synchronized to the instance-owned range through the host setter. This
+    // is the same path that makes a folder with fewer files immediately usable.
     values[sample] = 99;
     factory->parameterChanged(algorithm, sample);
     values[sample] = -1;
     factory->parameterChanged(algorithm, sample);
     if (factory->parameterString(algorithm, sample, -1, invalidText) != 0 ||
-        gStreamOpenCalls != opensBeforeInvalidSample ||
-        gFileInfoCalls != filesBeforeInvalidSample || gInvalidCatalogLookup) {
-        return fail("invalid sample substituted or opened another file");
+        values[sample] != 0 ||
+        gStreamOpenCalls != opensBeforeInvalidSample + 2 ||
+        gFileInfoCalls != filesBeforeInvalidSample + 2 ||
+        gOpenedFolder != 0 || gOpenedSample != 0 || gInvalidCatalogLookup) {
+        return fail("Sample value was not synchronized to the folder range");
     }
     factory->step(algorithm, buses.data(), kFrames / 4);
-    silentLeft = buses.data() + 12 * kFrames;
-    silentRight = buses.data() + 13 * kFrames;
+    double synchronizedSampleEnergy = 0.0;
     for (int i = 0; i < kFrames; ++i) {
-        if (values[source] != 1 || silentLeft[i] != 0.0f ||
-            silentRight[i] != 0.0f) {
-            return fail("invalid sample did not leave Sample mode silent");
-        }
+        synchronizedSampleEnergy += std::fabs(buses[12 * kFrames + i]) +
+                                    std::fabs(buses[13 * kFrames + i]);
+    }
+    if (values[source] != 1 || synchronizedSampleEnergy == 0.0) {
+        return fail("range-synchronized Sample value did not play");
     }
 
     // Switching back to live resets Capicola and cannot invoke the legacy

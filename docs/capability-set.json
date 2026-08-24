@@ -139,8 +139,8 @@
     "acceptedCatalog": "Only files enumerated by the pinned NT sample-folder APIs",
     "metadata": "uint32 frame count and sample rate; mono or stereo; 8-, 16-, 24-bit PCM or 32-bit float as represented by _NT_wavInfo",
     "conversion": "The pinned API reader converts the requested channel count and bit depth. The wrapper advances through the loaded buffer at file sample rate / host sample rate with linear interpolation.",
-    "wrapperLimits": "At most the first 1,536,000 frames are loaded into fixed construction-time memory (32 seconds at 48 kHz). Mono is duplicated to the stereo engine and stereo preserves channel order. Unsupported or unreadable files remain host errors.",
-    "notSamplerFeatures": ["recording", "looping", "reverse", "scrubbing", "start/end editing", "slicing/chopping", "polyphonic playback", "live/sample mixing", "silent sample substitution"]
+    "wrapperLimits": "At most the first 1,536,000 frames are loaded into fixed construction-time memory (32 seconds at 48 kHz) and loop while Sample mode is active because there is no transport trigger. Entering Sample or changing Folder loads the current valid selection; Folder changes synchronize Sample to the visible legal range. Mono is duplicated to the stereo engine and stereo preserves channel order. Unsupported or unreadable files remain host errors.",
+    "notSamplerFeatures": ["recording", "reverse", "scrubbing", "start/end editing", "loop-point editing", "loop-boundary crossfade", "slicing/chopping", "polyphonic playback", "live/sample mixing", "silent sample substitution"]
   },
   "excludedUpstreamSurface": [
     {

@@ -49,8 +49,9 @@ Accordingly, the wrapper boundary is:
 - accept only files that the NT host enumerates through its sample-folder API;
 - duplicate mono into Capicola's two processing channels and preserve stereo order;
 - load at most the first 1,536,000 frames (32 seconds at the audited 48 kHz baseline) into fixed construction-time memory;
+- load the current valid selection when Sample mode is entered or Folder changes, synchronize Sample to a changed folder's legal range, and loop the loaded range because this source has no transport trigger;
 - leave unsupported/unreadable resources to host error behavior; and
-- add no recording, looping, reverse, scrubbing, start/end editing, chopping, polyphony, source mixing, or sample substitution.
+- add no recording, reverse, scrubbing, start/end editing, chopping, polyphony, source mixing, hidden file substitution, loop-point editing, or loop-boundary crossfade.
 
 The SDK header does not promise that every file with a `.wav` suffix is accepted, so this project does not make that broader claim.
 

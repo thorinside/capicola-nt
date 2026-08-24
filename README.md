@@ -87,12 +87,12 @@ The bottom line says **MAIN** or **ALT** and shows the current Mix. **IN** and
 **OUT** are envelope levels from 00–99; `!` after either value means its
 transient detector fired.
 
-The source label has three states:
+The source label has four states:
 
 - **LIVE** — the selected input buses are being processed.
 - **SAMPLE LOAD** — the NT is reading the selected sample into memory.
-- **SAMPLE PLAY** — the loaded sample is playing.
-- **SAMPLE WAIT** — Sample mode is selected, but no sample is playing.
+- **SAMPLE PLAY** — the loaded sample is looping.
+- **SAMPLE WAIT** — Sample mode is selected, but no sample is available.
 
 ## Load and play a sample
 
@@ -100,18 +100,24 @@ Capicola uses the sample catalogue provided by the disting NT. It does not scan
 arbitrary paths itself.
 
 1. Put the sample in a folder that appears in the NT sample catalogue.
-2. Turn the left encoder until the source changes to **Sample**.
-3. Press the left encoder. On **SELECT FOLDER**, turn to choose a folder and
+2. Turn the left encoder until the source changes to **Sample**. Capicola
+   immediately loads the currently selected valid folder/sample.
+3. To choose something else, press the left encoder. On **SELECT FOLDER**, turn
+   to choose a folder and
    press to continue.
 4. On **SELECT SAMPLE**, turn to choose a sample and press to load it.
 5. The performance screen returns. **SAMPLE LOAD** is shown while the file is
    read, followed by **SAMPLE PLAY** when playback begins. **SAMPLE WAIT** means
-   that nothing is currently playing.
+   that the selection could not be loaded.
 
-Samples play once, forward, from the beginning. To restart the selected sample,
-confirm the **Sample** parameter again or repeat the selection. Mono samples
-feed both channels; stereo samples keep their left/right order. Capicola loads
-at most 1,536,000 frames from the start of a file (32 seconds at 48 kHz).
+Samples loop continuously, forward, from the beginning. Changing Folder loads
+the current valid Sample in that folder; if the old Sample number is outside the
+new folder's range, the NT value is moved into range before loading. Confirm the
+**Sample** parameter again to reload and restart it. Mono samples feed both
+channels; stereo samples keep their left/right order. Capicola loads at most
+1,536,000 frames from the start of a file (32 seconds at 48 kHz). Use a
+loop-prepared file when the wrap point needs to be seamless; Capicola does not
+edit loop points or add a boundary crossfade.
 
 The Source, Folder, and Sample selections are ordinary NT preset parameters.
 Keep the SD sample catalogue stable when a preset depends on a sample. If the
@@ -122,7 +128,7 @@ playback. After inserting or remounting the card, confirm **Sample** again
 before another load. Capicola does not perform catalogue discovery or file
 reads in the audio callback.
 
-Capicola does not add looping, reverse playback, scrubbing, regions, chopping,
+Capicola does not add reverse playback, scrubbing, regions, chopping,
 polyphony, recording, or live/sample mixing.
 
 ## Controls
@@ -180,11 +186,8 @@ analysis signal and an audio output—to the same bus.
   Left input to both channels.
 - **The display stays at SAMPLE LOAD:** wait for the file read to finish. If it
   does not finish, reinsert the SD card and select the sample again.
-- **The display says SAMPLE WAIT:** this is also the normal state after the
-  one-shot reaches its end. If it never played, make sure the SD card is mounted
-  and the selected folder/sample still exists, then confirm Sample again.
-- **A sample stops:** sample playback is intentionally one-shot; confirm the
-  Sample parameter again to restart it.
+- **The display says SAMPLE WAIT:** make sure the SD card is mounted and the
+  selected folder/sample still exists, then confirm Sample again.
 - **The level keeps increasing:** set Feedback below 100%, preferably to 0%
   while diagnosing the patch.
 - **CV is not changing a control:** use the NT parameter-mapping interface;

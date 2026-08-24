@@ -28,9 +28,12 @@ sound afterward.
 Live mode reads the selected logical buses, with optional left-to-right mono
 normalization. Sample mode uses the API v13 folder catalogue and asynchronous
 WAV reader. It loads up to 1,536,000 frames from the exact selected catalogue
-entry into a fixed stereo float buffer, then plays that buffer once, forward.
-The source-rate/host-rate ratio advances a linearly interpolated playback
-cursor. Both channels render to private scratch buffers before Add/Replace audio
+entry into a fixed stereo float buffer, then loops that buffer forward. Entering
+Sample mode and changing Folder both initiate a valid selected load outside the
+audio callback. Folder changes also synchronize Sample into the new legal
+range through the callback-safe host setter. The source-rate/host-rate ratio
+advances a linearly interpolated playback cursor that wraps in constant bounded
+work. Both channels render to private scratch buffers before Add/Replace audio
 output writes. Four optional analysis signals replace their selected CV buses
 and default to `None`.
 

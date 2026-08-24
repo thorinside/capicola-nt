@@ -14,10 +14,11 @@ ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_SPEC_SHA256 = "39dd5357c55bd5baee57b13d5c2105bba85cc1bcd7130eb79b750a33338e6253"
 EXPECTED_EXCLUSIONS = {
     "recording",
-    "looping",
     "reverse",
     "scrubbing",
     "start/end editing",
+    "loop-point editing",
+    "loop-boundary crossfade",
     "slicing/chopping",
     "polyphonic playback",
     "live/sample mixing",
