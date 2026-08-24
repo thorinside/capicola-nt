@@ -1,0 +1,4 @@
+# Pinned vendor provenance for Capicola for disting NT.
+# Update this file, the license audit, and verification expectations together.
+vendor/capicola https://github.com/heavylight-industries/capicola.git f0fb61cfa7111067b4ec1a642d1b16a0910adb3b
+vendor/distingNT_API https://github.com/expertsleepersltd/distingNT_API.git cd12d876dbe060859828053efab1cbc98c9df251

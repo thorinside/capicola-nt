@@ -5,14 +5,17 @@ BUILD_DIR ?= build
 PLUGIN := $(BUILD_DIR)/plugins/capicola.o
 COMMON_INCLUDES := -Iinclude -Ivendor/capicola/lib
 
-.PHONY: all clean verify verify-audit test-upstream test-live plugin inspect-plugin
+.PHONY: all clean verify verify-audit verify-license test-upstream test-live plugin inspect-plugin source-package
 
 all: plugin
 
-verify: verify-audit test-upstream test-live plugin inspect-plugin
+verify: verify-audit verify-license test-upstream test-live plugin inspect-plugin
 
 verify-audit:
 	python3 tools/verify_capability_audit.py
+
+verify-license:
+	python3 tools/verify_license_release.py
 
 test-upstream:
 	mkdir -p "$(AUDIT_TEST_DIR)"
@@ -49,6 +52,9 @@ inspect-plugin: $(PLUGIN)
 	arm-none-eabi-readelf -h "$(PLUGIN)" | grep -q 'Type:[[:space:]]*REL (Relocatable file)'
 	arm-none-eabi-readelf -h "$(PLUGIN)" | grep -q 'Machine:[[:space:]]*ARM'
 	arm-none-eabi-nm -g "$(PLUGIN)" | grep -q ' T pluginEntry$$'
+
+source-package: verify-license
+	python3 tools/build_source_archive.py
 
 clean:
 	rm -rf "$(BUILD_DIR)"

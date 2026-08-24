@@ -1,3 +1,6 @@
+// Capicola for disting NT: independently maintained wrapper integration, 2026.
+// SPDX-License-Identifier: AGPL-3.0-only
+
 #include <cmath>
 #include <cstddef>
 #include <cstdint>

@@ -1,6 +1,6 @@
 # Capicola for disting NT
 
-A planned disting NT wrapper around [Capicola](https://github.com/heavylight-industries/capicola).
+An independently maintained disting NT wrapper around [Capicola](https://github.com/heavylight-industries/capicola), authored by Heavylight Industries. This is not an official upstream Capicola release.
 
 ## Delivery status
 
@@ -16,3 +16,13 @@ make verify
 ```
 
 The ARM plugin object is written to `build/plugins/capicola.o`.
+
+## License and source
+
+Capicola for disting NT and the incorporated Capicola DSP are free software released under the **GNU Affero General Public License, version 3** (`AGPL-3.0-only`). There is no warranty. See [LICENSE](LICENSE) for the complete terms, [NOTICE](NOTICE) and [third-party notices](THIRD_PARTY_NOTICES.md) for attribution, and the completed [license audit](docs/LICENSE_AUDIT.md) for the audited obligations.
+
+Each object-code release must offer the explicitly attached `capicola-nt-source.tar.gz` corresponding-source archive at no extra charge. GitHub's automatic source snapshots omit submodule contents and are not a substitute. See the [corresponding-source instructions](docs/SOURCE_OFFER.md). Release maintainers build and check the archive with:
+
+```sh
+make source-package
+```

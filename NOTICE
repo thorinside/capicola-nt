@@ -1,0 +1,24 @@
+Capicola for disting NT
+Copyright (C) 2026 Neal Sanche and contributors
+
+Capicola for disting NT is an independently maintained disting NT wrapper around
+Capicola. It is not the upstream Capicola hardware project and is not presented
+as an official release by Heavylight Industries.
+
+Upstream project: https://github.com/heavylight-industries/capicola
+Upstream author and project identity: Heavylight Industries
+Pinned upstream revision: f0fb61cfa7111067b4ec1a642d1b16a0910adb3b
+Wrapper integration first published: 2026
+
+The wrapper and the incorporated Capicola code are released under the GNU
+Affero General Public License, version 3. The complete license text is in
+LICENSE. This software is provided without warranty, as described in sections
+15 and 16 of that license.
+
+Capicola's existing notices and attribution are retained in the pinned
+vendor/capicola submodule. The disting NT API headers are copyright (c) 2025
+Expert Sleepers Ltd and are used under the MIT License. See
+LICENSES/distingNT_API-MIT.txt and THIRD_PARTY_NOTICES.md.
+
+Corresponding source, build scripts, and exact submodule provenance are
+provided with each object-code release as described in docs/SOURCE_OFFER.md.
