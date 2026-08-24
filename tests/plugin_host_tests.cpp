@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <string>
 #include <vector>
 
 #include <distingnt/api.h>
@@ -30,6 +31,7 @@ uint32_t gOpenedSample = 0;
 float gOpenedSpeed = 0.0f;
 _NT_algorithm* gAlgorithm = nullptr;
 const _NT_factory* gFactory = nullptr;
+std::vector<std::string> gDrawnText;
 
 int fail(const char* message) {
     std::printf("FAIL: %s\n", message);
@@ -54,6 +56,13 @@ bool pageContains(const _NT_parameterPages* pages, const char* pageName, int par
         for (uint32_t i = 0; i < candidate.numParams; ++i) {
             if (candidate.params[i] == parameter) return true;
         }
+    }
+    return false;
+}
+
+bool drawnTextContains(const char* fragment) {
+    for (const std::string& text : gDrawnText) {
+        if (text.find(fragment) != std::string::npos) return true;
     }
     return false;
 }
@@ -146,7 +155,9 @@ extern "C" void NT_setParameterFromUi(uint32_t, uint32_t parameter, int16_t valu
     }
 }
 
-void NT_drawText(int, int, const char*, int, _NT_textAlignment, _NT_textSize) {}
+void NT_drawText(int, int, const char* text, int, _NT_textAlignment, _NT_textSize) {
+    gDrawnText.emplace_back(text == nullptr ? "" : text);
+}
 
 int main() {
     const auto* factory = reinterpret_cast<const _NT_factory*>(
@@ -326,6 +337,16 @@ int main() {
     }
     _NT_float3 initialPots{};
     factory->setupUi(algorithm, initialPots);
+    gDrawnText.clear();
+    factory->draw(algorithm);
+    if (!drawnTextContains("CAPICOLA   LIVE") ||
+        !drawnTextContains("STRETCH") || !drawnTextContains("THRESH") ||
+        !drawnTextContains("FEEDBACK") || !drawnTextContains("MAIN") ||
+        !drawnTextContains("IN ") || !drawnTextContains("OUT ") ||
+        !drawnTextContains("MIX 100%")) {
+        return fail("persistent performance screen omitted source, controls, or activity");
+    }
+
     _NT_uiData ui{};
     ui.controls = kNT_potL;
     ui.pots[0] = 1.0f;
@@ -343,6 +364,34 @@ int main() {
     if (values[pitch] != 60) {
         return fail("alternate performance pot did not control Pitch");
     }
+    gDrawnText.clear();
+    factory->draw(algorithm);
+    if (!drawnTextContains("ALT") || !drawnTextContains("PITCH") ||
+        !drawnTextContains("+6.0 st") || !drawnTextContains("GRAIN") ||
+        !drawnTextContains("QUALITY")) {
+        return fail("alternate pot functions did not show their identity and value");
+    }
+    // Every pressable pot switches the shared MAIN/ALT performance bank.
+    ui = {};
+    ui.controls = kNT_potButtonC;
+    factory->customUi(algorithm, ui);
+    gDrawnText.clear();
+    factory->draw(algorithm);
+    if (!drawnTextContains("MAIN") || !drawnTextContains("STRETCH")) {
+        return fail("centre pot press did not restore the visible main bank");
+    }
+    ui = {};
+    ui.controls = kNT_potButtonR;
+    factory->customUi(algorithm, ui);
+    gDrawnText.clear();
+    factory->draw(algorithm);
+    if (!drawnTextContains("ALT") || !drawnTextContains("QUALITY")) {
+        return fail("right pot press did not expose the visible alternate bank");
+    }
+    ui = {};
+    ui.controls = kNT_potButtonR;
+    factory->customUi(algorithm, ui);
+
     ui = {};
     ui.encoders[1] = -10;
     factory->customUi(algorithm, ui);
@@ -401,6 +450,8 @@ int main() {
     bool sawOutputTransient = false;
     bool sawInputEnvelope = false;
     bool sawOutputEnvelope = false;
+    bool screenShowedEnvelopeActivity = false;
+    bool screenShowedTransientActivity = false;
     for (int block = 0; block < 360; ++block) {
         std::fill(buses.begin(), buses.end(), 0.0f);
         float* left = buses.data();
@@ -420,10 +471,19 @@ int main() {
         sawOutputTransient = sawOutputTransient || outputGate == 5.0f;
         sawInputEnvelope = sawInputEnvelope || inputEnvelope > 0.0f;
         sawOutputEnvelope = sawOutputEnvelope || outputEnvelope > 0.0f;
+        gDrawnText.clear();
+        factory->draw(algorithm);
+        screenShowedEnvelopeActivity = screenShowedEnvelopeActivity ||
+            (!drawnTextContains("IN 00") && !drawnTextContains("OUT 00"));
+        screenShowedTransientActivity = screenShowedTransientActivity ||
+            drawnTextContains("!");
     }
     if (!sawInputTransient || !sawOutputTransient ||
         !sawInputEnvelope || !sawOutputEnvelope) {
         return fail("an assigned analysis signal did not reach its CV bus");
+    }
+    if (!screenShowedEnvelopeActivity || !screenShowedTransientActivity) {
+        return fail("performance screen did not report envelope/transient activity");
     }
 
     // The shared Transient Threshold must govern the post-mix detector just as
@@ -493,8 +553,31 @@ int main() {
     ui = {};
     ui.controls = kNT_encoderButtonL;
     factory->customUi(algorithm, ui);
-    if (gStreamOpenCalls != opensBeforeSampleSource + 1) {
-        return fail("performance UI did not confirm the selected sample");
+    gDrawnText.clear();
+    factory->draw(algorithm);
+    if (gStreamOpenCalls != opensBeforeSampleSource ||
+        !drawnTextContains("SELECT FOLDER") || !drawnTextContains("Drums") ||
+        !drawnTextContains("PRESS: NEXT")) {
+        return fail("sample loading did not open the temporary folder selection");
+    }
+    ui = {};
+    ui.controls = kNT_encoderButtonL;
+    factory->customUi(algorithm, ui);
+    gDrawnText.clear();
+    factory->draw(algorithm);
+    if (gStreamOpenCalls != opensBeforeSampleSource ||
+        !drawnTextContains("SELECT SAMPLE") ||
+        !drawnTextContains("Stereo.wav") || !drawnTextContains("PRESS: LOAD")) {
+        return fail("folder confirmation did not open temporary sample selection");
+    }
+    ui = {};
+    ui.controls = kNT_encoderButtonL;
+    factory->customUi(algorithm, ui);
+    gDrawnText.clear();
+    factory->draw(algorithm);
+    if (gStreamOpenCalls != opensBeforeSampleSource + 1 ||
+        !drawnTextContains("CAPICOLA   SAMPLE PLAY")) {
+        return fail("sample confirmation did not return to the performance screen");
     }
 
     // All five audited secondary controls must alter their intended linked

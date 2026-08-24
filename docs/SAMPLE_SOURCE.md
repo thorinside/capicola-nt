@@ -15,8 +15,8 @@ Changing source resets Capicola's source history. This prevents audio retained f
 
 1. Put a sample in a location enumerated by disting NT's sample-folder catalogue.
 2. Turn the left encoder on the persistent Capicola performance screen to select **Sample** (or set the `Source` parameter).
-3. Use the host's temporary `Source` parameter view to choose `Folder` and the displayed `Sample`.
-4. Press the left encoder on the performance screen, or confirm `Sample` in the host view, to open that exact selection.
+3. Press the left encoder to temporarily replace the performance screen with **SELECT FOLDER**. Turn to choose a host-catalogued folder, then press to continue.
+4. On **SELECT SAMPLE**, turn to choose the displayed host-catalogued sample and press to load it. The persistent performance screen returns immediately and shows **SAMPLE PLAY** after a successful open or **SAMPLE WAIT** when no stream is open.
 
 The folder and sample names shown by the parameters come from the host catalogue. Changing `Folder` updates the legal `Sample` range and closes the prior stream, but does not open a file; confirming `Sample` opens that exact valid catalogue entry as a one-shot stream from its beginning. Confirming it again reopens it. An invalid folder or sample value is not clamped to a different catalogue entry, displays no substituted name, and leaves Sample mode selected but silent. The wrapper requests normal sequential, forward playback and uses the file sample rate to ask the host streamer for rate conversion to the 48 kHz baseline.
 
@@ -34,14 +34,15 @@ Supported catalogue metadata and format boundaries are recorded in [`CAPABILITY_
 
 ## Performance controls
 
-The custom performance screen keeps the active **LIVE**/**SAMPLE** source, three immediate controls, MAIN/ALT state, and Mix visible. It follows the approved v2 interaction hierarchy:
+The custom performance screen keeps the active **LIVE**/**SAMPLE PLAY**/**SAMPLE WAIT** source state, three immediate controls, MAIN/ALT state, Mix, and Capicola input/output activity visible. **IN** and **OUT** show the normalized envelope level from 00–99; `!` beside either value reports its transient detector. It follows the approved v2 interaction hierarchy:
 
 - Main pots: **Stretch**, **Threshold**, **Feedback**.
-- Press any pot to expose the clearly labelled alternate trio: **Pitch**, **Grain Size**, **Quality**.
+- Press any of the three pots to switch the complete bank to the clearly labelled alternate trio: **Pitch**, **Grain Size**, **Quality**. The active MAIN/ALT identity, each active control name, and each value remain visible.
 - Turn the right encoder for **Mix**; press it for the audited momentary **Slice** action.
-- Turn the left encoder to replace Live with Sample or Sample with Live; in Sample mode, press it to confirm the displayed host-catalogued sample.
+- Turn the left encoder to replace Live with Sample or Sample with Live. In Sample mode, press it to enter the temporary folder/sample selection described above.
+- The temporary selector uses only the left encoder. Pressing after a sample choice loads it and returns to the one persistent performance screen; pots and the right encoder do not change performance controls while selection is open.
 
-All twelve continuous controls are ordinary NT parameters on the **Performance** page, so host parameter-to-CV mapping remains available. The persistent screen keeps the approved v2 immediate/alternate hierarchy above; the host parameter view exposes the five secondary controls without adding a routine page or materially changing that screen:
+No separate module buttons are claimed by the custom UI. All twelve continuous controls are ordinary NT parameters on the **Performance** page, so host parameter-to-CV mapping remains available. The persistent screen keeps the approved v2 immediate/alternate hierarchy above; the host parameter view exposes the five secondary controls without adding a routine performance page or materially changing that screen:
 
 - **Envelope Smoothing:** 0.00–100.00% normalized sweep maps exponentially to cutoff 0.00005–0.125 (about 1.2 Hz–3 kHz at 48 kHz); default 42.59% (about 0.0014).
 - **Fade:** 0.00–100.00% maps exponentially to 10–250 ms (480–12000 frames at 48 kHz); default 21.53% (about 20 ms).

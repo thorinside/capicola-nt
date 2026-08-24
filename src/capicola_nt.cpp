@@ -51,6 +51,12 @@ enum SourceMode {
     kSourceSample,
 };
 
+enum UiView {
+    kUiPerformance,
+    kUiFolderSelection,
+    kUiSampleSelection,
+};
+
 static const char* const kSourceNames[] = {"Live", "Sample"};
 
 static const _NT_parameter kParameterTemplate[] = {
@@ -154,6 +160,7 @@ struct Algorithm : public _NT_algorithm {
     bool cardMounted;
     bool streamOpen;
     SourceMode activeSource;
+    UiView uiView;
     bool alternateControls;
 };
 
@@ -192,6 +199,7 @@ _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& memory,
     algorithm->cardMounted = false;
     algorithm->streamOpen = false;
     algorithm->activeSource = kSourceLive;
+    algorithm->uiView = kUiPerformance;
     algorithm->alternateControls = false;
     return algorithm;
 }
@@ -541,12 +549,50 @@ void step(_NT_algorithm* base, float* busFrames, int numFramesBy4) {
                     5.0f * algorithm->processor->outputEnvelope());
 }
 
+void drawSelection(Algorithm* algorithm) {
+    char name[kNT_parameterStringSize] = {};
+    char text[64];
+    const bool folderView = algorithm->uiView == kUiFolderSelection;
+    const int parameter = folderView ? kParamFolder : kParamSample;
+    if (parameterString(algorithm, parameter, algorithm->v[parameter], name) == 0) {
+        std::strncpy(name, algorithm->cardMounted ? "Unavailable" : "No SD card",
+                     sizeof(name) - 1);
+    }
+    std::snprintf(text, sizeof(text), "SELECT %s",
+                  folderView ? "FOLDER" : "SAMPLE");
+    NT_drawText(0, 11, text, 8);
+    NT_drawText(0, 34, name, 15, kNT_textLeft, kNT_textLarge);
+    NT_drawText(0, 60,
+                folderView ? "TURN: CHOOSE   PRESS: NEXT"
+                           : "TURN: CHOOSE   PRESS: LOAD",
+                10);
+}
+
+void formatControlValue(const Algorithm* algorithm, int parameter,
+                        char* text, std::size_t size) {
+    const long value = static_cast<long>(algorithm->v[parameter]);
+    if (parameter == kParamPitch) {
+        std::snprintf(text, size, "%+.1f st", static_cast<double>(value) * 0.1);
+    } else if (parameter == kParamGrainSize) {
+        std::snprintf(text, size, "%ld", value);
+    } else {
+        std::snprintf(text, size, "%ld%%", value);
+    }
+}
+
 bool draw(_NT_algorithm* base) {
     Algorithm* algorithm = static_cast<Algorithm*>(base);
-    char text[48];
-    const char* source = algorithm->v[kParamSource] == kSourceSample
-        ? "SAMPLE" : "LIVE";
-    std::snprintf(text, sizeof(text), "CAPICOLA  %s", source);
+    if (algorithm->uiView != kUiPerformance) {
+        drawSelection(algorithm);
+        return true;
+    }
+
+    char text[64];
+    const bool sampleMode = algorithm->v[kParamSource] == kSourceSample;
+    const char* sourceState = sampleMode
+        ? (algorithm->streamOpen ? "SAMPLE PLAY" : "SAMPLE WAIT")
+        : "LIVE";
+    std::snprintf(text, sizeof(text), "CAPICOLA   %s", sourceState);
     NT_drawText(0, 10, text);
 
     const int params[2][3] = {
@@ -559,13 +605,22 @@ bool draw(_NT_algorithm* base) {
     };
     const int row = algorithm->alternateControls ? 1 : 0;
     for (int i = 0; i < 3; ++i) {
-        NT_drawText(i * 43, 29, labels[row][i], 8);
-        std::snprintf(text, sizeof(text), "%ld",
-                      static_cast<long>(algorithm->v[params[row][i]]));
-        NT_drawText(i * 43, 42, text);
+        const int x = i * 85;
+        NT_drawText(x, 27, labels[row][i], 8);
+        formatControlValue(algorithm, params[row][i], text, sizeof(text));
+        NT_drawText(x, 40, text);
     }
-    std::snprintf(text, sizeof(text), "%s  MIX %ld%%",
+
+    const long inputEnvelope = static_cast<long>(
+        std::fmin(1.0f, algorithm->processor->inputEnvelope()) * 99.0f + 0.5f);
+    const long outputEnvelope = static_cast<long>(
+        std::fmin(1.0f, algorithm->processor->outputEnvelope()) * 99.0f + 0.5f);
+    std::snprintf(text, sizeof(text), "%s  IN %02ld%c OUT %02ld%c  MIX %ld%%",
                   algorithm->alternateControls ? "ALT" : "MAIN",
+                  inputEnvelope,
+                  algorithm->processor->inputTransient() ? '!' : ' ',
+                  outputEnvelope,
+                  algorithm->processor->outputTransient() ? '!' : ' ',
                   static_cast<long>(algorithm->v[kParamMix]));
     NT_drawText(0, 60, text, 12);
     return true;
@@ -592,6 +647,25 @@ void setFromUi(Algorithm* algorithm, int parameter, int value) {
 
 void customUi(_NT_algorithm* base, const _NT_uiData& data) {
     Algorithm* algorithm = static_cast<Algorithm*>(base);
+
+    if (algorithm->uiView != kUiPerformance) {
+        const int parameter = algorithm->uiView == kUiFolderSelection
+            ? kParamFolder : kParamSample;
+        if (data.encoders[0] != 0) {
+            setFromUi(algorithm, parameter,
+                      algorithm->v[parameter] + data.encoders[0]);
+        }
+        if (pressed(data, kNT_encoderButtonL)) {
+            if (algorithm->uiView == kUiFolderSelection) {
+                algorithm->uiView = kUiSampleSelection;
+            } else {
+                openSelectedSample(algorithm);
+                algorithm->uiView = kUiPerformance;
+            }
+        }
+        return;
+    }
+
     if (pressed(data, kNT_potButtonL) || pressed(data, kNT_potButtonC) ||
         pressed(data, kNT_potButtonR)) {
         algorithm->alternateControls = !algorithm->alternateControls;
@@ -618,9 +692,7 @@ void customUi(_NT_algorithm* base, const _NT_uiData& data) {
     }
     if (pressed(data, kNT_encoderButtonL) &&
         algorithm->v[kParamSource] == kSourceSample) {
-        // Folder/sample browsing remains the host's temporary parameter view;
-        // this confirms its displayed sample from the performance screen.
-        openSelectedSample(algorithm);
+        algorithm->uiView = kUiFolderSelection;
     }
     if (data.encoders[1] != 0) {
         setFromUi(algorithm, kParamMix,
