@@ -37,9 +37,10 @@ render to private scratch buffers before Add/Replace audio output writes. Four
 optional analysis signals replace their selected CV buses and default to `None`.
 
 All persistent DSP, stream, and block storage comes from the memory supplied at
-construction; the audio path performs no heap allocation. The opaque stream
-state uses `NT_globals.streamSizeBytes`, and its host buffer uses
-`NT_globals.streamBufferSizeBytes`; no full-file buffer is reserved. Typed
+construction; the audio path performs no heap allocation. Two opaque stream
+slots use `NT_globals.streamSizeBytes`, and their two host buffers use
+`NT_globals.streamBufferSizeBytes`; no full-file buffer is reserved. One slot
+remains audible while the other waits for and buffers its first host block. Typed
 objects and scratch buffers are explicitly aligned within those byte
 allocations. Engine reset is constant-time with respect to the large sparse
 rings: it resets their live range and sentinel rather than clearing roughly half
@@ -62,16 +63,17 @@ mirrored immediately for display while the host commits the parameter update.
 All twelve continuous processing controls remain ordinary host parameters on
 the Performance page.
 
-Replacing or explicitly reopening a sample starts a fixed two-phase safety
-transition. The already-warm Capicola processor is preserved across a valid
-sample-to-sample replacement. The new stream runs from frame zero while output
-gain falls to zero over 50 ms and rises to unity over the next 50 ms. The two
-phases meet inside the same audio block, so only one midpoint sample is forced
-to zero and there is no cold-engine or block-boundary silence gap. The counters
-and failure-path held stereo values live in the instance, and the per-sample
-work is bounded. This transition does not alter the user-facing **Fade**
-processing parameter. Entering Sample mode from another source still resets the
-engine at that source boundary.
+Replacing or explicitly reopening a sample prepares a second fixed stream slot.
+The old stream remains audible until `NT_streamRender()` returns the replacement's
+first frames. The already-warm Capicola processor then receives the old stream
+during a 50 ms fade-out, switches to the buffered replacement at the zero-gain
+midpoint, and receives the new stream during a 50 ms fade-in. The phases can meet
+inside one audio block, so only one midpoint sample is forced to zero and there
+is no cold-engine or block-boundary silence gap. The stream state, prefetch block,
+counters, and failure-path held stereo values live in the instance, and the
+per-sample work is bounded. This transition does not alter the user-facing
+**Fade** processing parameter. Entering Sample mode from another source still
+resets the engine at that source boundary.
 
 ## Pinned source and platform
 

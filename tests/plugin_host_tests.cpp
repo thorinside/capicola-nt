@@ -36,8 +36,18 @@ uint32_t gStreamClock = 0;
 float gStreamSourcePosition = 0.0f;
 uint32_t gOpenedFolder = 0;
 uint32_t gOpenedSample = 0;
+uint32_t gStreamInitialEmptyRenders = 0;
 _NT_algorithm* gAlgorithm = nullptr;
 const _NT_factory* gFactory = nullptr;
+struct HostStreamState {
+    uint32_t folder;
+    uint32_t sample;
+    uint32_t clock;
+    uint32_t emptyRendersRemaining;
+    float sourcePosition;
+    bool open;
+};
+static_assert(sizeof(HostStreamState) <= 64U);
 struct DrawCall {
     std::string text;
     int x;
@@ -156,26 +166,41 @@ extern "C" bool NT_streamOpen(_NT_stream stream,
     }
     gOpenedFolder = data.folder;
     gOpenedSample = data.sample;
-    gStreamClock = 0;
-    gStreamSourcePosition = 0.0f;
-    return gStreamOpenSucceeds;
+    HostStreamState* state = static_cast<HostStreamState*>(stream);
+    *state = {
+        data.folder,
+        data.sample,
+        0U,
+        gStreamInitialEmptyRenders,
+        0.0f,
+        gStreamOpenSucceeds,
+    };
+    return state->open;
 }
 
-extern "C" uint32_t NT_streamRender(_NT_stream,
+extern "C" uint32_t NT_streamRender(_NT_stream stream,
                                       _NT_frame* renderBuffer,
                                       uint32_t numFrames,
                                       float speed) {
     ++gStreamRenderCalls;
-    if (!gCardMounted || !std::isfinite(speed) || speed <= 0.0f) {
+    HostStreamState* state = static_cast<HostStreamState*>(stream);
+    if (state == nullptr || !state->open || !gCardMounted ||
+        !std::isfinite(speed) || speed <= 0.0f) {
         return 0;
     }
-    const uint32_t sourceRate = gOpenedFolder == 1 ? 24000U : 48000U;
+    if (state->emptyRendersRemaining != 0U) {
+        --state->emptyRendersRemaining;
+        gStreamClock = state->clock;
+        gStreamSourcePosition = state->sourcePosition;
+        return 0;
+    }
+    const uint32_t sourceRate = state->folder == 1 ? 24000U : 48000U;
     uint32_t rendered = 0;
     for (; rendered < numFrames &&
-           gStreamSourcePosition < static_cast<float>(gSampleFrameCount);
-         ++rendered, ++gStreamClock) {
-        const uint32_t index = static_cast<uint32_t>(gStreamSourcePosition);
-        const float fraction = gStreamSourcePosition - static_cast<float>(index);
+           state->sourcePosition < static_cast<float>(gSampleFrameCount);
+         ++rendered, ++state->clock) {
+        const uint32_t index = static_cast<uint32_t>(state->sourcePosition);
+        const float fraction = state->sourcePosition - static_cast<float>(index);
         const uint32_t next = index + 1U < gSampleFrameCount ? index + 1U : index;
         const float source0 = std::sin(
             2.0f * kPi * 330.0f * static_cast<float>(index) /
@@ -184,13 +209,15 @@ extern "C" uint32_t NT_streamRender(_NT_stream,
             2.0f * kPi * 330.0f * static_cast<float>(next) /
             static_cast<float>(sourceRate));
         renderBuffer[rendered][0] = source0 + fraction * (source1 - source0);
-        renderBuffer[rendered][1] = gOpenedSample == 0
+        renderBuffer[rendered][1] = state->sample == 0
             ? renderBuffer[rendered][0]
             : 0.35f * std::sin(
-                2.0f * kPi * 710.0f * gStreamSourcePosition /
+                2.0f * kPi * 710.0f * state->sourcePosition /
                 static_cast<float>(sourceRate));
-        gStreamSourcePosition += speed;
+        state->sourcePosition += speed;
     }
+    gStreamClock = state->clock;
+    gStreamSourcePosition = state->sourcePosition;
     return rendered;
 }
 
@@ -237,8 +264,8 @@ int main() {
     _NT_algorithmRequirements requirements{};
     factory->calculateRequirements(requirements, nullptr);
     if (requirements.dram >= 1024U * 1024U ||
-        requirements.dtc < NT_globals.streamSizeBytes) {
-        return fail("sample source still reserves a full-file buffer instead of a stream");
+        requirements.dtc < 2U * NT_globals.streamSizeBytes) {
+        return fail("sample source did not reserve two fixed streaming slots");
     }
     // The API exposes byte pointers, so deliberately offset each allocation.
     // Construction must align every typed object within the requested budget.
@@ -762,17 +789,16 @@ int main() {
         }
     };
 
-    // Changing Sample replaces the active stream synchronously without ever
-    // initiating a full-file read.
+    // A pending selection opens without a full-file read. Returning to the
+    // still-audible selection cancels that pending handoff.
     values[sample] = 0;
     const uint32_t opensBeforeReplacement = gStreamOpenCalls;
     factory->parameterChanged(algorithm, sample);
     values[sample] = 1;
     factory->parameterChanged(algorithm, sample);
-    if (gStreamOpenCalls != opensBeforeReplacement + 2 ||
-        gSampleReadCalls != readsBeforeSampleSource ||
-        gOpenedSample != 1) {
-        return fail("replacement sample did not replace the active stream");
+    if (gStreamOpenCalls != opensBeforeReplacement + 1 ||
+        gSampleReadCalls != readsBeforeSampleSource) {
+        return fail("pending sample selection was not opened and cancelled");
     }
     gDrawnText.clear();
     factory->draw(algorithm);
@@ -924,6 +950,7 @@ int main() {
     // cold-engine silence between the samples.
     const uint32_t opensBeforeFolderChange = gStreamOpenCalls;
     const uint32_t rendersBeforeFolderChange = gStreamRenderCalls;
+    gStreamInitialEmptyRenders = 1U;
     values[folder] = 1;
     values[sample] = 1;
     factory->parameterChanged(algorithm, folder);
@@ -933,12 +960,24 @@ int main() {
         gOpenedFolder != 1 || gOpenedSample != 0) {
         return fail("folder change did not synchronize and open its valid sample");
     }
+    factory->step(algorithm, buses.data(), kFrames / 4);
+    gStreamInitialEmptyRenders = 0U;
+    double waitingEnergy = 0.0;
+    for (int i = 0; i < kFrames; ++i) {
+        waitingEnergy += std::fabs(buses[12 * kFrames + i]) +
+                         std::fabs(buses[13 * kFrames + i]);
+    }
+    if (gStreamRenderCalls != rendersBeforeFolderChange + 2U ||
+        waitingEnergy == 0.0) {
+        return fail("old stream did not continue while replacement waited for frames");
+    }
+    const uint32_t rendersBeforeWetFade = gStreamRenderCalls;
     int consecutiveSilentFrames = 0;
     int longestSilentRun = 0;
     for (int block = 0; block < 75; ++block) {
         factory->step(algorithm, buses.data(), kFrames / 4);
-        if (gStreamRenderCalls != rendersBeforeFolderChange +
-                static_cast<uint32_t>(block + 1)) {
+        if (gStreamRenderCalls != rendersBeforeWetFade +
+                static_cast<uint32_t>(block + 2)) {
             return fail("replacement stream stopped during the wet transition");
         }
         for (int i = 0; i < kFrames; ++i) {
@@ -959,18 +998,21 @@ int main() {
     // phases and crosses zero for exactly one sample without waiting for a new
     // audio block.
     values[mix] = 0;
+    const float oldSourcePosition = gStreamSourcePosition;
     pressSampleLoad();
     const uint32_t rendersBeforeDryTransition = gStreamRenderCalls;
     constexpr int kSampleFadeFrames = 2400;
     for (int block = 0; block < 75; ++block) {
         factory->step(algorithm, buses.data(), kFrames / 4);
         if (gStreamRenderCalls != rendersBeforeDryTransition +
-                static_cast<uint32_t>(block + 1)) {
+                static_cast<uint32_t>(block + 2)) {
             return fail("replacement stream did not run throughout its transition");
         }
         for (int i = 0; i < kFrames; ++i) {
             const int transitionFrame = block * kFrames + i;
-            const float position = static_cast<float>(transitionFrame) * 0.5f;
+            const float position = transitionFrame < kSampleFadeFrames
+                ? oldSourcePosition + static_cast<float>(transitionFrame) * 0.5f
+                : static_cast<float>(transitionFrame - kSampleFadeFrames) * 0.5f;
             const uint32_t index = static_cast<uint32_t>(position);
             const float fraction = position - static_cast<float>(index);
             const float source0 = std::sin(
@@ -1092,7 +1134,7 @@ int main() {
     pressSampleLoad();
     factory->step(algorithm, buses.data(), kFrames / 4);
     if (gStreamOpenCalls != opensBeforeRemount + 1 ||
-        gStreamRenderCalls != rendersBeforeRemount + 3 ||
+        gStreamRenderCalls != rendersBeforeRemount + 4 ||
         gOpenedFolder != 1 || gOpenedSample != 0) {
         return fail("explicit sample LOAD did not recover after remount");
     }
@@ -1202,9 +1244,9 @@ int main() {
     factory->parameterChanged(algorithm, sample);
     if (factory->parameterString(algorithm, sample, -1, invalidText) != 0 ||
         values[sample] != 0 ||
-        gStreamOpenCalls != opensBeforeInvalidSample + 2 ||
+        gStreamOpenCalls != opensBeforeInvalidSample + 1 ||
         gFileInfoCalls != filesBeforeInvalidSample + 2 ||
-        gOpenedFolder != 0 || gOpenedSample != 0 || gInvalidCatalogLookup) {
+        gOpenedFolder != 0 || gOpenedSample != 1 || gInvalidCatalogLookup) {
         return fail("Sample value was not synchronized to the folder range");
     }
     settleSampleTransition();

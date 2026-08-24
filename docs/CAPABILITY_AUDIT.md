@@ -48,9 +48,9 @@ Accordingly, the wrapper boundary is:
 
 - accept only files that the NT host enumerates through its sample-folder API;
 - duplicate mono into Capicola's two processing channels and preserve stereo order;
-- reserve only the API-sized per-instance stream state, stream buffer, and one host block of rendered frames rather than a full-file buffer;
+- reserve two API-sized per-instance stream states and buffers plus two host blocks of rendered frames rather than a full-file buffer;
 - open the current valid selection when Sample mode is entered or Folder changes, synchronize Sample to a changed folder's legal range, and loop the full stream because this source has no transport trigger;
-- preserve the warm processor across a valid sample-to-sample replacement and run the new stream through a fixed 50 ms fade-out to silence followed immediately by a 50 ms fade-in, without changing the exposed Fade processing control;
+- preserve the warm processor across a valid sample-to-sample replacement, keep the old stream audible until the pending stream returns frames, switch streams at the zero-gain midpoint of a fixed 50 ms fade-out/50 ms fade-in, and leave the exposed Fade processing control unchanged;
 - bound loop recovery to one reopen per audio block and drop the remaining frames on an unexpected short render rather than performing unbounded SD work;
 - leave unsupported/unreadable resources to host error behavior; and
 - add no recording, reverse, scrubbing, start/end editing, chopping, polyphony, source mixing, hidden file substitution, loop-point editing, or loop-boundary crossfade.

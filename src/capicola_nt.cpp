@@ -173,15 +173,27 @@ struct Algorithm : public _NT_algorithm {
     SourceProcessor* processor;
     _NT_stream stream;
     void* streamBuffer;
+    _NT_stream pendingStream;
+    void* pendingStreamBuffer;
     _NT_frame* streamFrames;
+    _NT_frame* pendingStreamFrames;
     float* scratchLeft;
     float* scratchRight;
     float* sampleLeft;
     float* sampleRight;
     SampleStreamSpec streamedSample;
+    SampleStreamSpec pendingSample;
     uint32_t streamSourceFrame;
     float streamSourceFraction;
     float sampleSpeed;
+    uint32_t pendingSourceFrame;
+    float pendingSourceFraction;
+    float pendingSampleSpeed;
+    uint32_t activePrefetchFrames;
+    uint32_t activePrefetchOffset;
+    uint32_t pendingPrefetchFrames;
+    bool pendingSampleOpen;
+    bool pendingSamplePrimed;
     char streamedSampleName[kNT_parameterStringSize];
     bool cardMounted;
     bool sampleReady;
@@ -211,12 +223,12 @@ void calculateRequirements(_NT_algorithmRequirements& requirements,
     requirements.sram = sizeof(Algorithm) + alignof(Algorithm) - 1U;
     requirements.dram = alignof(SourceProcessor) - 1U +
                         sizeof(SourceProcessor) +
-                        2U * (alignof(float) - 1U) +
-                        NT_globals.streamBufferSizeBytes +
-                        NT_globals.maxFramesPerStep * sizeof(_NT_frame) +
+                        3U * (alignof(float) - 1U) +
+                        2U * NT_globals.streamBufferSizeBytes +
+                        2U * NT_globals.maxFramesPerStep * sizeof(_NT_frame) +
                         4U * NT_globals.maxFramesPerStep * sizeof(float);
-    requirements.dtc = alignof(uint32_t) - 1U +
-                       NT_globals.streamSizeBytes;
+    requirements.dtc = 2U * (alignof(uint32_t) - 1U +
+                             NT_globals.streamSizeBytes);
     requirements.itc = 0;
 }
 
@@ -260,18 +272,35 @@ _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& memory,
     algorithm->streamBuffer = cursor;
     cursor += NT_globals.streamBufferSizeBytes;
     cursor = alignPointer(cursor, alignof(float));
+    algorithm->pendingStreamBuffer = cursor;
+    cursor += NT_globals.streamBufferSizeBytes;
+    cursor = alignPointer(cursor, alignof(float));
     algorithm->streamFrames = reinterpret_cast<_NT_frame*>(cursor);
+    cursor += NT_globals.maxFramesPerStep * sizeof(_NT_frame);
+    algorithm->pendingStreamFrames = reinterpret_cast<_NT_frame*>(cursor);
     cursor += NT_globals.maxFramesPerStep * sizeof(_NT_frame);
     algorithm->scratchLeft = reinterpret_cast<float*>(cursor);
     algorithm->scratchRight = algorithm->scratchLeft + NT_globals.maxFramesPerStep;
     algorithm->sampleLeft = algorithm->scratchRight + NT_globals.maxFramesPerStep;
     algorithm->sampleRight = algorithm->sampleLeft + NT_globals.maxFramesPerStep;
-    algorithm->stream = alignPointer(memory.dtc, alignof(uint32_t));
+    uint8_t* dtcCursor = alignPointer(memory.dtc, alignof(uint32_t));
+    algorithm->stream = dtcCursor;
+    dtcCursor += NT_globals.streamSizeBytes;
+    algorithm->pendingStream = alignPointer(dtcCursor, alignof(uint32_t));
 
     algorithm->streamedSample = {};
+    algorithm->pendingSample = {};
     algorithm->streamSourceFrame = 0U;
     algorithm->streamSourceFraction = 0.0f;
     algorithm->sampleSpeed = 1.0f;
+    algorithm->pendingSourceFrame = 0U;
+    algorithm->pendingSourceFraction = 0.0f;
+    algorithm->pendingSampleSpeed = 1.0f;
+    algorithm->activePrefetchFrames = 0U;
+    algorithm->activePrefetchOffset = 0U;
+    algorithm->pendingPrefetchFrames = 0U;
+    algorithm->pendingSampleOpen = false;
+    algorithm->pendingSamplePrimed = false;
     algorithm->streamedSampleName[0] = '\0';
     algorithm->cardMounted = NT_isSdCardMounted();
     algorithm->sampleReady = false;
@@ -442,9 +471,14 @@ bool updateSampleRange(Algorithm* algorithm) {
 void invalidateSamplePlayback(Algorithm* algorithm) {
     algorithm->streamSourceFrame = 0U;
     algorithm->streamSourceFraction = 0.0f;
+    algorithm->activePrefetchFrames = 0U;
+    algorithm->activePrefetchOffset = 0U;
     algorithm->streamedSampleName[0] = '\0';
     algorithm->sampleReady = false;
     algorithm->samplePlaying = false;
+    algorithm->pendingSampleOpen = false;
+    algorithm->pendingSamplePrimed = false;
+    algorithm->pendingPrefetchFrames = 0U;
 }
 
 void beginSampleTransition(Algorithm* algorithm,
@@ -477,9 +511,11 @@ void stopSamplePlayback(Algorithm* algorithm) {
     beginSampleTransition(algorithm, fadeOutFirst, false, oldLeft, oldRight);
 }
 
-bool openSampleStream(Algorithm* algorithm, const SampleStreamSpec& spec) {
+bool openStream(_NT_stream stream,
+                void* streamBuffer,
+                const SampleStreamSpec& spec) {
     const _NT_streamOpenData data = {
-        .streamBuffer = algorithm->streamBuffer,
+        .streamBuffer = streamBuffer,
         .folder = spec.folder,
         .sample = spec.sample,
         .velocity = 1.0f,
@@ -487,7 +523,11 @@ bool openSampleStream(Algorithm* algorithm, const SampleStreamSpec& spec) {
         .reverse = false,
         .rrMode = kNT_RRModeSequential,
     };
-    if (!NT_streamOpen(algorithm->stream, data)) {
+    return NT_streamOpen(stream, data);
+}
+
+bool openSampleStream(Algorithm* algorithm, const SampleStreamSpec& spec) {
+    if (!openStream(algorithm->stream, algorithm->streamBuffer, spec)) {
         algorithm->sampleReady = false;
         algorithm->samplePlaying = false;
         return false;
@@ -495,6 +535,8 @@ bool openSampleStream(Algorithm* algorithm, const SampleStreamSpec& spec) {
     algorithm->streamedSample = spec;
     algorithm->streamSourceFrame = 0U;
     algorithm->streamSourceFraction = 0.0f;
+    algorithm->activePrefetchFrames = 0U;
+    algorithm->activePrefetchOffset = 0U;
     algorithm->sampleSpeed = static_cast<float>(spec.sampleRate) /
                              static_cast<float>(NT_globals.sampleRate);
     algorithm->sampleReady = std::isfinite(algorithm->sampleSpeed) &&
@@ -505,6 +547,103 @@ bool openSampleStream(Algorithm* algorithm, const SampleStreamSpec& spec) {
     algorithm->streamedSampleName[
         sizeof(algorithm->streamedSampleName) - 1U] = '\0';
     return algorithm->sampleReady;
+}
+
+bool openPendingSampleStream(Algorithm* algorithm,
+                             const SampleStreamSpec& spec) {
+    algorithm->pendingSampleOpen = false;
+    algorithm->pendingSamplePrimed = false;
+    algorithm->pendingPrefetchFrames = 0U;
+    if (!openStream(algorithm->pendingStream,
+                    algorithm->pendingStreamBuffer, spec)) {
+        return false;
+    }
+    const float speed = static_cast<float>(spec.sampleRate) /
+                        static_cast<float>(NT_globals.sampleRate);
+    if (!std::isfinite(speed) || speed <= 0.0f) {
+        return false;
+    }
+    algorithm->pendingSample = spec;
+    algorithm->pendingSourceFrame = 0U;
+    algorithm->pendingSourceFraction = 0.0f;
+    algorithm->pendingSampleSpeed = speed;
+    algorithm->pendingSampleOpen = true;
+    return true;
+}
+
+bool advanceStreamPosition(uint32_t& sourceFrame,
+                           float& sourceFraction,
+                           uint32_t sampleFrames,
+                           uint32_t rendered,
+                           float speed) {
+    const float advance = sourceFraction +
+        static_cast<float>(rendered) * speed;
+    if (!std::isfinite(advance) ||
+        advance >= static_cast<float>(UINT32_MAX)) {
+        return false;
+    }
+    const uint32_t wholeFrames = static_cast<uint32_t>(advance);
+    sourceFraction = advance - static_cast<float>(wholeFrames);
+    const uint32_t remaining = sampleFrames - sourceFrame;
+    sourceFrame += wholeFrames < remaining ? wholeFrames : remaining;
+    return true;
+}
+
+bool primePendingSampleStream(Algorithm* algorithm, uint32_t frames) {
+    if (!algorithm->pendingSampleOpen || algorithm->pendingSamplePrimed ||
+        frames == 0U || frames > NT_globals.maxFramesPerStep) {
+        return algorithm->pendingSamplePrimed;
+    }
+    const uint32_t rendered = NT_streamRender(
+        algorithm->pendingStream, algorithm->pendingStreamFrames,
+        frames, algorithm->pendingSampleSpeed);
+    const uint32_t bounded = rendered > frames ? frames : rendered;
+    if (bounded == 0U ||
+        !advanceStreamPosition(algorithm->pendingSourceFrame,
+                               algorithm->pendingSourceFraction,
+                               algorithm->pendingSample.frames,
+                               bounded,
+                               algorithm->pendingSampleSpeed)) {
+        return false;
+    }
+    algorithm->pendingPrefetchFrames = bounded;
+    algorithm->pendingSamplePrimed = true;
+    return true;
+}
+
+void activatePendingSampleStream(Algorithm* algorithm) {
+    if (!algorithm->pendingSamplePrimed) return;
+
+    _NT_stream oldStream = algorithm->stream;
+    algorithm->stream = algorithm->pendingStream;
+    algorithm->pendingStream = oldStream;
+    void* oldStreamBuffer = algorithm->streamBuffer;
+    algorithm->streamBuffer = algorithm->pendingStreamBuffer;
+    algorithm->pendingStreamBuffer = oldStreamBuffer;
+
+    algorithm->streamedSample = algorithm->pendingSample;
+    algorithm->streamSourceFrame = algorithm->pendingSourceFrame;
+    algorithm->streamSourceFraction = algorithm->pendingSourceFraction;
+    algorithm->sampleSpeed = algorithm->pendingSampleSpeed;
+    algorithm->activePrefetchFrames = algorithm->pendingPrefetchFrames;
+    algorithm->activePrefetchOffset = 0U;
+    std::memcpy(algorithm->streamFrames, algorithm->pendingStreamFrames,
+                static_cast<std::size_t>(algorithm->activePrefetchFrames) *
+                    sizeof(_NT_frame));
+    std::strncpy(algorithm->streamedSampleName,
+                 algorithm->pendingSample.name,
+                 sizeof(algorithm->streamedSampleName) - 1U);
+    algorithm->streamedSampleName[
+        sizeof(algorithm->streamedSampleName) - 1U] = '\0';
+    algorithm->sampleReady = true;
+    algorithm->samplePlaying = true;
+
+    algorithm->pendingSampleOpen = false;
+    algorithm->pendingSamplePrimed = false;
+    algorithm->pendingPrefetchFrames = 0U;
+    algorithm->sampleTransitionFrame = 0U;
+    algorithm->sampleTransitionPhase = kSampleTransitionFadeIn;
+    algorithm->sampleTransitionFadeInPending = false;
 }
 
 // Catalogue discovery and parameter-definition updates may touch the SD card
@@ -563,23 +702,24 @@ void openSelectedSample(Algorithm* algorithm, bool forceReload = false) {
     const bool sameActiveStream =
         algorithm->streamedSample.folder == folder &&
         algorithm->streamedSample.sample == sample;
+    const bool samePendingStream = algorithm->pendingSampleOpen &&
+        algorithm->pendingSample.folder == folder &&
+        algorithm->pendingSample.sample == sample;
     if (!forceReload && sameActiveStream && algorithm->sampleReady) {
+        algorithm->pendingSampleOpen = false;
+        algorithm->pendingSamplePrimed = false;
+        algorithm->pendingPrefetchFrames = 0U;
+        if (algorithm->sampleTransitionPhase == kSampleTransitionFadeOut &&
+            algorithm->sampleTransitionFadeInPending) {
+            const uint32_t fadeOutFrame = algorithm->sampleTransitionFrame;
+            algorithm->sampleTransitionPhase = kSampleTransitionFadeIn;
+            algorithm->sampleTransitionFadeInPending = false;
+            algorithm->sampleTransitionFrame =
+                algorithm->sampleTransitionFrames - fadeOutFrame - 1U;
+        }
         return;
     }
-
-    // Open the replacement outside step(). When another sample is already
-    // active, keep the processor warm and run the new stream throughout a
-    // down/up gain transition instead of resetting into a long wet-path gap.
-    const bool fadeOutFirst = algorithm->samplePlaying ||
-        algorithm->sampleTransitionPhase != kSampleTransitionNone;
-    const bool preserveProcessorState = algorithm->samplePlaying &&
-        algorithm->sampleReady && !algorithm->processorFaulted;
-    const float oldLeft = algorithm->lastOutputLeft;
-    const float oldRight = algorithm->lastOutputRight;
-    invalidateSamplePlayback(algorithm);
-    if (!preserveProcessorState) {
-        resetProcessor(algorithm, false);
-    }
+    if (!forceReload && samePendingStream) return;
 
     SampleStreamSpec spec{};
     spec.folder = folder;
@@ -589,11 +729,27 @@ void openSelectedSample(Algorithm* algorithm, bool forceReload = false) {
     std::strncpy(spec.name, info.name == nullptr ? "Sample" : info.name,
                  sizeof(spec.name) - 1U);
     spec.name[sizeof(spec.name) - 1U] = '\0';
+
+    // Keep the currently audible stream and warm processor intact. The audio
+    // callback first asks the separately opened stream for real frames; only
+    // after that succeeds does the old stream begin fading toward the exact
+    // midpoint handoff.
+    const bool hasActiveStream = algorithm->samplePlaying &&
+        algorithm->sampleReady && !algorithm->processorFaulted;
+    if (hasActiveStream) {
+        if (!openPendingSampleStream(algorithm, spec)) {
+            stopSamplePlayback(algorithm);
+        }
+        return;
+    }
+
+    invalidateSamplePlayback(algorithm);
+    resetProcessor(algorithm, false);
     const bool opened = openSampleStream(algorithm, spec);
-    if (!opened && preserveProcessorState) {
+    if (!opened) {
         resetProcessor(algorithm, false);
     }
-    beginSampleTransition(algorithm, fadeOutFirst, opened, oldLeft, oldRight);
+    beginSampleTransition(algorithm, false, opened, 0.0f, 0.0f);
 }
 
 void selectSource(Algorithm* algorithm, SourceMode source) {
@@ -761,10 +917,13 @@ void writeAnalysisCv(float* busFrames,
     }
 }
 
-uint32_t renderStreamedSample(Algorithm* algorithm, int frames) {
-    std::memset(algorithm->sampleLeft, 0,
+uint32_t renderStreamedSample(Algorithm* algorithm,
+                              int outputOffset,
+                              int frames,
+                              bool& restartedThisBlock) {
+    std::memset(algorithm->sampleLeft + outputOffset, 0,
                 static_cast<std::size_t>(frames) * sizeof(float));
-    std::memset(algorithm->sampleRight, 0,
+    std::memset(algorithm->sampleRight + outputOffset, 0,
                 static_cast<std::size_t>(frames) * sizeof(float));
 
     if (!algorithm->sampleReady || !algorithm->samplePlaying ||
@@ -780,45 +939,60 @@ uint32_t renderStreamedSample(Algorithm* algorithm, int frames) {
     }
 
     uint32_t total = 0U;
-    uint32_t restarts = 0U;
+    if (algorithm->activePrefetchOffset < algorithm->activePrefetchFrames) {
+        const uint32_t available = algorithm->activePrefetchFrames -
+            algorithm->activePrefetchOffset;
+        const uint32_t copied = available < static_cast<uint32_t>(frames)
+            ? available : static_cast<uint32_t>(frames);
+        for (uint32_t i = 0U; i < copied; ++i) {
+            const _NT_frame& frame = algorithm->streamFrames[
+                algorithm->activePrefetchOffset + i];
+            algorithm->sampleLeft[outputOffset + total + i] =
+                std::isfinite(frame[0]) ? frame[0] * kSamplePlaybackGain : 0.0f;
+            algorithm->sampleRight[outputOffset + total + i] =
+                std::isfinite(frame[1]) ? frame[1] * kSamplePlaybackGain : 0.0f;
+        }
+        algorithm->activePrefetchOffset += copied;
+        total += copied;
+        if (algorithm->activePrefetchOffset >=
+            algorithm->activePrefetchFrames) {
+            algorithm->activePrefetchFrames = 0U;
+            algorithm->activePrefetchOffset = 0U;
+        }
+    }
+
     while (total < static_cast<uint32_t>(frames)) {
         if (algorithm->streamSourceFrame >= algorithm->streamedSample.frames) {
-            if (restarts != 0U) break;
+            if (restartedThisBlock) break;
             const SampleStreamSpec loop = algorithm->streamedSample;
             if (!openSampleStream(algorithm, loop)) break;
-            ++restarts;
+            restartedThisBlock = true;
         }
 
         const uint32_t requested = static_cast<uint32_t>(frames) - total;
         const uint32_t sourceFrameBefore = algorithm->streamSourceFrame;
         const float sourceFractionBefore = algorithm->streamSourceFraction;
         const uint32_t rendered = NT_streamRender(
-            algorithm->stream, algorithm->streamFrames + total,
+            algorithm->stream, algorithm->streamFrames,
             requested, algorithm->sampleSpeed);
         const uint32_t bounded = rendered > requested ? requested : rendered;
         for (uint32_t i = 0U; i < bounded; ++i) {
-            const float left = algorithm->streamFrames[total + i][0];
-            const float right = algorithm->streamFrames[total + i][1];
-            algorithm->sampleLeft[total + i] = std::isfinite(left)
+            const float left = algorithm->streamFrames[i][0];
+            const float right = algorithm->streamFrames[i][1];
+            algorithm->sampleLeft[outputOffset + total + i] = std::isfinite(left)
                 ? left * kSamplePlaybackGain : 0.0f;
-            algorithm->sampleRight[total + i] = std::isfinite(right)
+            algorithm->sampleRight[outputOffset + total + i] = std::isfinite(right)
                 ? right * kSamplePlaybackGain : 0.0f;
         }
         total += bounded;
-        const float advance = algorithm->streamSourceFraction +
-            static_cast<float>(bounded) * algorithm->sampleSpeed;
-        if (!std::isfinite(advance) ||
-            advance >= static_cast<float>(UINT32_MAX)) {
+        if (!advanceStreamPosition(algorithm->streamSourceFrame,
+                                   algorithm->streamSourceFraction,
+                                   algorithm->streamedSample.frames,
+                                   bounded,
+                                   algorithm->sampleSpeed)) {
             algorithm->samplePlaying = false;
             break;
         }
-        const uint32_t wholeFrames = static_cast<uint32_t>(advance);
-        algorithm->streamSourceFraction =
-            advance - static_cast<float>(wholeFrames);
-        const uint32_t remaining = algorithm->streamedSample.frames -
-            algorithm->streamSourceFrame;
-        algorithm->streamSourceFrame += wholeFrames < remaining
-            ? wholeFrames : remaining;
 
         if (bounded == requested) break;
         const float requestedAdvance = sourceFractionBefore +
@@ -826,11 +1000,11 @@ uint32_t renderStreamedSample(Algorithm* algorithm, int frames) {
         const bool expectedEnd = std::isfinite(requestedAdvance) &&
             requestedAdvance >= static_cast<float>(
                 algorithm->streamedSample.frames - sourceFrameBefore);
-        if (!expectedEnd || restarts != 0U) break;
+        if (!expectedEnd || restartedThisBlock) break;
 
         const SampleStreamSpec loop = algorithm->streamedSample;
         if (!openSampleStream(algorithm, loop)) break;
-        ++restarts;
+        restartedThisBlock = true;
     }
     return total;
 }
@@ -862,7 +1036,35 @@ void renderStoppedSampleFadeOut(Algorithm* algorithm, int frames) {
     }
 }
 
-void applySampleStreamTransition(Algorithm* algorithm, int frames) {
+bool processSampleSegment(Algorithm* algorithm,
+                          int offset,
+                          int frames,
+                          bool& restartedThisBlock) {
+    const uint32_t count = renderStreamedSample(
+        algorithm, offset, frames, restartedThisBlock);
+    if (count == 0U || algorithm->processorFaulted) {
+        std::memset(algorithm->scratchLeft + offset, 0,
+                    static_cast<std::size_t>(frames) * sizeof(float));
+        std::memset(algorithm->scratchRight + offset, 0,
+                    static_cast<std::size_t>(frames) * sizeof(float));
+        return false;
+    }
+    algorithm->processor->process(algorithm->sampleLeft + offset,
+                                  algorithm->sampleRight + offset,
+                                  algorithm->scratchLeft + offset,
+                                  algorithm->scratchRight + offset,
+                                  static_cast<std::size_t>(frames));
+    if (!outputsAreFinite(algorithm->scratchLeft + offset,
+                          algorithm->scratchRight + offset, frames)) {
+        algorithm->processorFaulted = true;
+        return false;
+    }
+    return true;
+}
+
+void applySampleTransitionGain(Algorithm* algorithm,
+                               int offset,
+                               int frames) {
     const float reciprocal = 1.0f /
         static_cast<float>(algorithm->sampleTransitionFrames);
     for (int i = 0; i < frames; ++i) {
@@ -875,10 +1077,13 @@ void applySampleStreamTransition(Algorithm* algorithm, int frames) {
             if (algorithm->sampleTransitionFrame >=
                 algorithm->sampleTransitionFrames) {
                 algorithm->sampleTransitionFrame = 0U;
-                algorithm->sampleTransitionPhase =
-                    algorithm->sampleTransitionFadeInPending
-                        ? kSampleTransitionFadeIn : kSampleTransitionNone;
-                algorithm->sampleTransitionFadeInPending = false;
+                if (algorithm->sampleTransitionFadeInPending &&
+                    algorithm->pendingSamplePrimed) {
+                    activatePendingSampleStream(algorithm);
+                } else {
+                    algorithm->sampleTransitionPhase = kSampleTransitionNone;
+                    algorithm->sampleTransitionFadeInPending = false;
+                }
             }
         } else if (algorithm->sampleTransitionPhase ==
                    kSampleTransitionFadeIn) {
@@ -893,9 +1098,46 @@ void applySampleStreamTransition(Algorithm* algorithm, int frames) {
         } else {
             break;
         }
-        algorithm->scratchLeft[i] *= gain;
-        algorithm->scratchRight[i] *= gain;
+        algorithm->scratchLeft[offset + i] *= gain;
+        algorithm->scratchRight[offset + i] *= gain;
     }
+}
+
+bool processStreamedSampleBlock(Algorithm* algorithm, int frames) {
+    bool restartedThisBlock = false;
+    bool allSegmentsRendered = true;
+    int offset = 0;
+    while (offset < frames) {
+        int segmentFrames = frames - offset;
+        if (algorithm->sampleTransitionPhase == kSampleTransitionFadeOut) {
+            if (!algorithm->pendingSamplePrimed) {
+                const bool rendered = processSampleSegment(
+                    algorithm, offset, segmentFrames, restartedThisBlock);
+                const float gain = static_cast<float>(
+                    algorithm->sampleTransitionFrames -
+                    algorithm->sampleTransitionFrame) /
+                    static_cast<float>(algorithm->sampleTransitionFrames);
+                for (int i = 0; i < segmentFrames; ++i) {
+                    algorithm->scratchLeft[offset + i] *= gain;
+                    algorithm->scratchRight[offset + i] *= gain;
+                }
+                return rendered;
+            }
+            const uint32_t untilMidpoint =
+                algorithm->sampleTransitionFrames -
+                algorithm->sampleTransitionFrame;
+            if (static_cast<uint32_t>(segmentFrames) > untilMidpoint) {
+                segmentFrames = static_cast<int>(untilMidpoint);
+            }
+        }
+
+        const bool rendered = processSampleSegment(
+            algorithm, offset, segmentFrames, restartedThisBlock);
+        allSegmentsRendered = allSegmentsRendered && rendered;
+        applySampleTransitionGain(algorithm, offset, segmentFrames);
+        offset += segmentFrames;
+    }
+    return allSegmentsRendered;
 }
 
 void step(_NT_algorithm* base, float* busFrames, int numFramesBy4) {
@@ -911,6 +1153,18 @@ void step(_NT_algorithm* base, float* busFrames, int numFramesBy4) {
     // linked controls here keeps UI, mapped CV, live, and sample processing on
     // the same confirmed Capicola control surface.
     applyProcessingControls(algorithm);
+    if (algorithm->activeSource == kSourceSample &&
+        algorithm->pendingSampleOpen &&
+        !algorithm->pendingSamplePrimed) {
+        primePendingSampleStream(algorithm, static_cast<uint32_t>(frames));
+    }
+    if (algorithm->activeSource == kSourceSample &&
+        algorithm->pendingSamplePrimed &&
+        algorithm->sampleTransitionPhase == kSampleTransitionNone) {
+        beginSampleTransition(algorithm, true, true,
+                              algorithm->lastOutputLeft,
+                              algorithm->lastOutputRight);
+    }
 
     const bool stoppedSampleFadingOut =
         algorithm->activeSource == kSourceSample &&
@@ -919,6 +1173,8 @@ void step(_NT_algorithm* base, float* busFrames, int numFramesBy4) {
     const float* left = nullptr;
     const float* right = nullptr;
     bool sourceAvailable = !stoppedSampleFadingOut;
+    bool sampleBlockProcessed = false;
+    bool sampleBlockRendered = false;
     if (stoppedSampleFadingOut) {
         // A missing or refused replacement has no stream to render. Retain a
         // bounded fade of the last valid output instead of cutting it off.
@@ -938,14 +1194,14 @@ void step(_NT_algorithm* base, float* busFrames, int numFramesBy4) {
         left = algorithm->sampleLeft;
         right = algorithm->sampleRight;
     } else {
-        const uint32_t count = renderStreamedSample(algorithm, frames);
-        sourceAvailable = count != 0;
-        left = algorithm->sampleLeft;
-        right = algorithm->sampleRight;
+        sampleBlockProcessed = true;
+        sampleBlockRendered = processStreamedSampleBlock(algorithm, frames);
     }
 
-    bool rendered = sourceAvailable && !algorithm->processorFaulted;
-    if (rendered) {
+    bool rendered = sampleBlockProcessed
+        ? sampleBlockRendered
+        : sourceAvailable && !algorithm->processorFaulted;
+    if (rendered && !sampleBlockProcessed) {
         // Render both channels before touching an output bus. This preserves
         // correct routing when outputs alias inputs.
         algorithm->processor->process(left,
@@ -965,9 +1221,6 @@ void step(_NT_algorithm* base, float* busFrames, int numFramesBy4) {
     } else if (!rendered) {
         fadeToSilence(algorithm->scratchLeft, algorithm->scratchRight, frames,
                       algorithm->lastOutputLeft, algorithm->lastOutputRight);
-    } else if (algorithm->activeSource == kSourceSample &&
-               algorithm->sampleTransitionPhase != kSampleTransitionNone) {
-        applySampleStreamTransition(algorithm, frames);
     }
     algorithm->lastOutputLeft = algorithm->scratchLeft[frames - 1];
     algorithm->lastOutputRight = algorithm->scratchRight[frames - 1];
