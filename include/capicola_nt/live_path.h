@@ -79,6 +79,26 @@ public:
         feedbackAmount_ = amount < 0.0f ? 0.0f : amount;
     }
 
+    void setEnvelopeSmoothing(float cutoff) {
+        for (auto& channel : channels_) channel.SetTkeoCutoff(cutoff);
+    }
+
+    void setFade(float frames) {
+        for (auto& channel : channels_) channel.SetGrainFade(frames);
+    }
+
+    void setDrive(float drive) {
+        for (auto& channel : channels_) channel.SetDistortDrive(drive);
+    }
+
+    void setDriveCharacter(float character) {
+        for (auto& channel : channels_) channel.SetDistortCharacter(character);
+    }
+
+    void setFeedbackTone(float cutoff) {
+        for (auto& filter : feedbackFilters_) filter.SetControls(cutoff, 0.01f);
+    }
+
     void setMix(float wet) {
         mix_ = wet < 0.0f ? 0.0f : (wet > 1.0f ? 1.0f : wet);
     }

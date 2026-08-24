@@ -33,7 +33,12 @@ enum Parameter {
     kParamGrainSize,
     kParamQuality,
     kParamFeedback,
+    kParamEnvelopeSmoothing,
+    kParamFade,
+    kParamDrive,
+    kParamDriveCharacter,
     kParamMix,
+    kParamFeedbackTone,
     kNumParameters,
 };
 
@@ -67,8 +72,20 @@ static const _NT_parameter kParameterTemplate[] = {
      .unit = kNT_unitPercent, .scaling = 0, .enumStrings = nullptr},
     {.name = "Feedback", .min = 0, .max = 150, .def = 0,
      .unit = kNT_unitPercent, .scaling = 0, .enumStrings = nullptr},
+    // Secondary controls use a 0.00-100.00% normalized sweep. The conversion
+    // below applies Capicola's exact exponential or linear panel taper.
+    {.name = "Envelope Smoothing", .min = 0, .max = 10000, .def = 4259,
+     .unit = kNT_unitPercent, .scaling = kNT_scaling100, .enumStrings = nullptr},
+    {.name = "Fade", .min = 0, .max = 10000, .def = 2153,
+     .unit = kNT_unitPercent, .scaling = kNT_scaling100, .enumStrings = nullptr},
+    {.name = "Drive", .min = 0, .max = 10000, .def = 1429,
+     .unit = kNT_unitPercent, .scaling = kNT_scaling100, .enumStrings = nullptr},
+    {.name = "Drive Character", .min = 0, .max = 10000, .def = 10000,
+     .unit = kNT_unitPercent, .scaling = kNT_scaling100, .enumStrings = nullptr},
     {.name = "Mix", .min = 0, .max = 100, .def = 100,
      .unit = kNT_unitPercent, .scaling = 0, .enumStrings = nullptr},
+    {.name = "Feedback Tone", .min = 0, .max = 10000, .def = 3769,
+     .unit = kNT_unitPercent, .scaling = kNT_scaling100, .enumStrings = nullptr},
 };
 
 static const uint8_t kPerformanceParameters[] = {
@@ -78,7 +95,12 @@ static const uint8_t kPerformanceParameters[] = {
     kParamGrainSize,
     kParamQuality,
     kParamFeedback,
+    kParamEnvelopeSmoothing,
+    kParamFade,
+    kParamDrive,
+    kParamDriveCharacter,
     kParamMix,
+    kParamFeedbackTone,
 };
 
 static const uint8_t kSourceParameters[] = {
@@ -175,6 +197,14 @@ float thresholdValue(int32_t value) {
         : 4.0f + (normalized - 0.9f) * 40.0f;
 }
 
+float secondaryNorm(int32_t value) {
+    return static_cast<float>(value) * 0.0001f;
+}
+
+float exponentialSweep(float minimum, float maximum, int32_t value) {
+    return minimum * std::pow(maximum / minimum, secondaryNorm(value));
+}
+
 void applyProcessingControls(Algorithm* algorithm) {
     algorithm->processor->setPitchSemitones(
         static_cast<float>(algorithm->v[kParamPitch]) * 0.1f);
@@ -186,8 +216,19 @@ void applyProcessingControls(Algorithm* algorithm) {
         0.1f - static_cast<float>(algorithm->v[kParamQuality]) * 0.00099f);
     algorithm->processor->setFeedback(
         static_cast<float>(algorithm->v[kParamFeedback]) * 0.01f);
+    algorithm->processor->setEnvelopeSmoothing(
+        exponentialSweep(5.0e-5f, 0.125f,
+                         algorithm->v[kParamEnvelopeSmoothing]));
+    algorithm->processor->setFade(
+        exponentialSweep(480.0f, 12000.0f, algorithm->v[kParamFade]));
+    algorithm->processor->setDrive(
+        0.5f + 3.5f * secondaryNorm(algorithm->v[kParamDrive]));
+    algorithm->processor->setDriveCharacter(
+        secondaryNorm(algorithm->v[kParamDriveCharacter]));
     algorithm->processor->setMix(
         static_cast<float>(algorithm->v[kParamMix]) * 0.01f);
+    algorithm->processor->setFeedbackTone(
+        exponentialSweep(2.0e-3f, 0.9f, algorithm->v[kParamFeedbackTone]));
 }
 
 bool catalogIndex(int32_t value, uint32_t count, uint32_t& index) {
@@ -293,7 +334,12 @@ void parameterChanged(_NT_algorithm* base, int parameter) {
         case kParamGrainSize:
         case kParamQuality:
         case kParamFeedback:
+        case kParamEnvelopeSmoothing:
+        case kParamFade:
+        case kParamDrive:
+        case kParamDriveCharacter:
         case kParamMix:
+        case kParamFeedbackTone:
             applyProcessingControls(algorithm);
             break;
         default:

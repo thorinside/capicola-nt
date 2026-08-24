@@ -42,6 +42,18 @@ int findParameter(const _NT_algorithm* algorithm, int count, const char* name) {
     return -1;
 }
 
+bool pageContains(const _NT_parameterPages* pages, const char* pageName, int parameter) {
+    if (pages == nullptr) return false;
+    for (uint32_t page = 0; page < pages->numPages; ++page) {
+        const _NT_parameterPage& candidate = pages->pages[page];
+        if (std::strcmp(candidate.name, pageName) != 0) continue;
+        for (uint32_t i = 0; i < candidate.numParams; ++i) {
+            if (candidate.params[i] == parameter) return true;
+        }
+    }
+    return false;
+}
+
 } // namespace
 
 extern "C" const _NT_globals NT_globals = {
@@ -171,15 +183,44 @@ int main() {
     const int grain = findParameter(algorithm, count, "Grain Size");
     const int quality = findParameter(algorithm, count, "Quality");
     const int feedback = findParameter(algorithm, count, "Feedback");
+    const int envelopeSmoothing = findParameter(algorithm, count, "Envelope Smoothing");
+    const int fade = findParameter(algorithm, count, "Fade");
+    const int drive = findParameter(algorithm, count, "Drive");
+    const int driveCharacter = findParameter(algorithm, count, "Drive Character");
     const int mix = findParameter(algorithm, count, "Mix");
+    const int feedbackTone = findParameter(algorithm, count, "Feedback Tone");
     if (leftInput < 0 || rightInput < 0 || leftOutput < 0 || leftMode < 0 ||
         rightOutput < 0 || rightMode < 0 || source < 0 || folder < 0 || sample < 0 ||
         pitch < 0 || stretch < 0 || threshold < 0 || grain < 0 || quality < 0 ||
-        feedback < 0 || mix < 0) {
+        feedback < 0 || envelopeSmoothing < 0 || fade < 0 || drive < 0 ||
+        driveCharacter < 0 || mix < 0 || feedbackTone < 0) {
         return fail("expected performance, source, and routing parameters are unavailable");
     }
 
+    const int auditedControls[] = {
+        pitch, stretch, threshold, grain, quality, feedback,
+        envelopeSmoothing, fade, drive, driveCharacter, mix, feedbackTone,
+    };
+    for (int parameter : auditedControls) {
+        if (!pageContains(algorithm->parameterPages, "Performance", parameter)) {
+            return fail("an audited continuous capability is absent from Performance");
+        }
+    }
+    const int secondaryControls[] = {
+        envelopeSmoothing, fade, drive, driveCharacter, feedbackTone,
+    };
+    const int expectedDefaults[] = {4259, 2153, 1429, 10000, 3769};
+    for (int i = 0; i < 5; ++i) {
+        const _NT_parameter& definition = algorithm->parameters[secondaryControls[i]];
+        if (definition.min != 0 || definition.max != 10000 ||
+            definition.def != expectedDefaults[i] ||
+            definition.scaling != kNT_scaling100) {
+            return fail("secondary control does not preserve its audited normalized sweep");
+        }
+    }
+
     std::vector<int16_t> values(requirements.numParameters, 0);
+    for (int i = 0; i < count; ++i) values[i] = algorithm->parameters[i].def;
     values[leftInput] = 1;
     values[rightInput] = 0;
     values[leftOutput] = 13;
@@ -269,6 +310,56 @@ int main() {
     if (gStreamOpenCalls != opensBeforeSampleSource + 1) {
         return fail("performance UI did not confirm the selected sample");
     }
+
+    // All five audited secondary controls must alter their intended linked
+    // Capicola/feedback path while the selected sample is the sole source.
+    // Reopening the sample resets both the host stream and engine, making each
+    // signature deterministic and independent of the previous control trial.
+    auto sampleSignature = [&](int parameter, int value, int feedbackValue,
+                               int characterValue) {
+        for (int control : secondaryControls) {
+            values[control] = algorithm->parameters[control].def;
+        }
+        values[feedback] = feedbackValue;
+        values[driveCharacter] = characterValue;
+        values[parameter] = value;
+        factory->parameterChanged(algorithm, parameter);
+        factory->parameterChanged(algorithm, sample);
+        double signature = 0.0;
+        for (int block = 0; block < 360; ++block) {
+            factory->step(algorithm, buses.data(), kFrames / 4);
+            const float* renderedLeft = buses.data() + 12 * kFrames;
+            const float* renderedRight = buses.data() + 13 * kFrames;
+            if (block >= 240) {
+                for (int i = 0; i < kFrames; ++i) {
+                    signature += renderedLeft[i] * (1.0 + i * 0.001) +
+                                 renderedRight[i] * (1.7 + i * 0.002);
+                }
+            }
+        }
+        return signature;
+    };
+    const double smoothingLow = sampleSignature(envelopeSmoothing, 0, 0, 10000);
+    const double smoothingHigh = sampleSignature(envelopeSmoothing, 10000, 0, 10000);
+    const double fadeLow = sampleSignature(fade, 0, 0, 10000);
+    const double fadeHigh = sampleSignature(fade, 10000, 0, 10000);
+    const double driveLow = sampleSignature(drive, 0, 0, 10000);
+    const double driveHigh = sampleSignature(drive, 10000, 0, 10000);
+    const double characterLow = sampleSignature(driveCharacter, 0, 0, 0);
+    const double characterHigh = sampleSignature(driveCharacter, 10000, 0, 10000);
+    const double toneLow = sampleSignature(feedbackTone, 0, 100, 10000);
+    const double toneHigh = sampleSignature(feedbackTone, 10000, 100, 10000);
+    if (std::fabs(smoothingLow - smoothingHigh) < 1.0e-4 ||
+        std::fabs(fadeLow - fadeHigh) < 1.0e-4 ||
+        std::fabs(driveLow - driveHigh) < 1.0e-4 ||
+        std::fabs(characterLow - characterHigh) < 1.0e-4 ||
+        std::fabs(toneLow - toneHigh) < 1.0e-4) {
+        return fail("a secondary control did not reach selected-sample processing");
+    }
+    // Restore audited defaults before continuing the source-isolation checks.
+    for (int control : secondaryControls) values[control] = algorithm->parameters[control].def;
+    values[feedback] = algorithm->parameters[feedback].def;
+    factory->parameterChanged(algorithm, sample);
 
     // Mix is a confirmed Capicola control: exercise it from the approved
     // performance interface while the selected sample is the active source.

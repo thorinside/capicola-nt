@@ -33,7 +33,15 @@ The custom performance screen keeps the active **LIVE**/**SAMPLE** source, three
 - Turn the right encoder for **Mix**; press it for the audited momentary **Slice** action.
 - Turn the left encoder to replace Live with Sample or Sample with Live; in Sample mode, press it to confirm the displayed host-catalogued sample.
 
-All seven continuous controls are ordinary NT parameters as well as custom-screen controls, so host parameter-to-CV mapping remains available. Their ranges and tapers are the audited upstream ranges in [`CAPABILITY_AUDIT.md`](CAPABILITY_AUDIT.md): Pitch ±12 semitones, Stretch realtime-to-freeze `(1-x)^2.5`, Threshold ratio 0–8/top=mute, Grain Size 32–4096 keyframes, Quality ε 0.1–0.001, Feedback 0–1.5, and Mix dry-to-wet.
+All twelve continuous controls are ordinary NT parameters on the **Performance** page, so host parameter-to-CV mapping remains available. The persistent screen keeps the approved v2 immediate/alternate hierarchy above; the host parameter view exposes the five secondary controls without adding a routine page or materially changing that screen:
+
+- **Envelope Smoothing:** 0.00–100.00% normalized sweep maps exponentially to cutoff 0.00005–0.125 (about 1.2 Hz–3 kHz at 48 kHz); default 42.59% (about 0.0014).
+- **Fade:** 0.00–100.00% maps exponentially to 10–250 ms (480–12000 frames at 48 kHz); default 21.53% (about 20 ms).
+- **Drive:** 0.00–100.00% maps linearly to 0.5–4.0; default 14.29% (about 1.0).
+- **Drive Character:** 0.00% quake, 50.00% clean, 100.00% sinc; default 100.00%.
+- **Feedback Tone:** 0.00–100.00% maps exponentially to normalized bandpass center 0.002–0.9 (about 48 Hz–21.6 kHz at 48 kHz); default 37.69% (about 0.02).
+
+These controls use the exact audited upstream sweep equations, are shared by the left and right Capicola channels (Feedback Tone controls both feedback filters), and affect Live and Sample through the same processing path. The existing controls retain their audited ranges and tapers: Pitch ±12 semitones, Stretch realtime-to-freeze `(1-x)^2.5`, Threshold ratio 0–8/top=mute, Grain Size 32–4096 keyframes, Quality ε 0.1–0.001, Feedback 0–1.5, and Mix dry-to-wet. Together with the right-encoder **Slice** action, the interface represents all 13 audited processing capabilities.
 
 ## Processing and routing
 
