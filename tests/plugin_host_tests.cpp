@@ -201,9 +201,21 @@ int main() {
         pitch, stretch, threshold, grain, quality, feedback,
         envelopeSmoothing, fade, drive, driveCharacter, mix, feedbackTone,
     };
+    int audioInputParameters = 0;
+    for (int parameter = 0; parameter < count; ++parameter) {
+        if (algorithm->parameters[parameter].unit == kNT_unitAudioInput) {
+            ++audioInputParameters;
+        }
+    }
+    if (audioInputParameters != 2 ||
+        algorithm->parameters[leftInput].unit != kNT_unitAudioInput ||
+        algorithm->parameters[rightInput].unit != kNT_unitAudioInput) {
+        return fail("processing added a plug-in-specific direct CV input");
+    }
     for (int parameter : auditedControls) {
-        if (!pageContains(algorithm->parameterPages, "Performance", parameter)) {
-            return fail("an audited continuous capability is absent from Performance");
+        if (!pageContains(algorithm->parameterPages, "Performance", parameter) ||
+            algorithm->parameters[parameter].unit == kNT_unitAudioInput) {
+            return fail("an audited control is not an ordinary NT parameter");
         }
     }
     const int secondaryControls[] = {
@@ -361,11 +373,11 @@ int main() {
     values[feedback] = algorithm->parameters[feedback].def;
     factory->parameterChanged(algorithm, sample);
 
-    // Mix is a confirmed Capicola control: exercise it from the approved
-    // performance interface while the selected sample is the active source.
-    ui = {};
-    ui.encoders[1] = -100;
-    factory->customUi(algorithm, ui);
+    // Simulate the host's ordinary parameter-to-CV mapping by replacing the
+    // effective Mix value in v[] between audio callbacks. Mapping is host-owned,
+    // so it does not call the plug-in's UI path or require parameterChanged().
+    // step() must consume the mapped value and apply it to Capicola.
+    values[mix] = 0;
     const uint32_t dryClock = gStreamClock;
     factory->step(algorithm, buses.data(), kFrames / 4);
     const float* dryLeft = buses.data() + 12 * kFrames;
@@ -377,18 +389,20 @@ int main() {
             2.0f * kPi * 710.0f * static_cast<float>(dryClock + i) / 48000.0f);
         if (std::fabs(dryLeft[i] - expectedLeft) > 1.0e-6f ||
             std::fabs(dryRight[i] - expectedRight) > 1.0e-6f) {
-            return fail("performance Mix control did not affect selected-sample processing");
+            return fail("host-mapped dry Mix value did not reach selected-sample processing");
         }
     }
-    ui = {};
-    ui.encoders[1] = 100;
-    factory->customUi(algorithm, ui);
+    // Move the same host-mapped effective parameter to fully wet, again
+    // without a plug-in-specific CV parameter or a parameter callback.
+    values[mix] = 100;
 
     double sampleEnergy = 0.0;
     double stereoDifference = 0.0;
+    double mappedWetDifference = 0.0;
     for (int block = 0; block < 320; ++block) {
         std::fill_n(buses.data(), 2 * kFrames,
                     std::numeric_limits<float>::quiet_NaN());
+        const uint32_t blockClock = gStreamClock;
         factory->step(algorithm, buses.data(), kFrames / 4);
         const float* outLeft = buses.data() + 12 * kFrames;
         const float* outRight = buses.data() + 13 * kFrames;
@@ -399,6 +413,14 @@ int main() {
                 }
                 sampleEnergy += outLeft[i] * outLeft[i] + outRight[i] * outRight[i];
                 stereoDifference += std::fabs(outLeft[i] - outRight[i]);
+                const float dryExpectedLeft = std::sin(
+                    2.0f * kPi * 330.0f * static_cast<float>(blockClock + i) /
+                    48000.0f);
+                const float dryExpectedRight = 0.35f * std::sin(
+                    2.0f * kPi * 710.0f * static_cast<float>(blockClock + i) /
+                    48000.0f);
+                mappedWetDifference += std::fabs(outLeft[i] - dryExpectedLeft) +
+                                       std::fabs(outRight[i] - dryExpectedRight);
             }
         }
     }
@@ -408,6 +430,9 @@ int main() {
     }
     if (sampleEnergy < 1.0 || stereoDifference < 1.0) {
         return fail("stereo sample was not processed through both Capicola channels");
+    }
+    if (mappedWetDifference < 1.0) {
+        return fail("host-mapped Mix value did not modulate Capicola processing");
     }
 
     // A folder change updates the Sample range and invalidates the old stream,
