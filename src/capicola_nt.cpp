@@ -19,6 +19,7 @@ namespace {
 // additional source history. The two rings live in host-provided DRAM.
 constexpr int kRingFrames = 16384;
 constexpr float kSamplePlaybackGain = 8.0f;
+constexpr uint32_t kSampleTransitionRateDivisor = 20U; // 50 ms.
 using SourceProcessor = capicola_nt::CapicolaStereoLivePath<kRingFrames>;
 
 struct SampleStreamSpec {
@@ -280,7 +281,8 @@ _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& memory,
     algorithm->uiView = kUiPerformance;
     algorithm->alternateControls = false;
     algorithm->pendingUiValueMask = 0U;
-    algorithm->sampleTransitionFrames = NT_globals.sampleRate / 200U;
+    algorithm->sampleTransitionFrames =
+        NT_globals.sampleRate / kSampleTransitionRateDivisor;
     if (algorithm->sampleTransitionFrames == 0U) {
         algorithm->sampleTransitionFrames = 1U;
     }
@@ -565,15 +567,19 @@ void openSelectedSample(Algorithm* algorithm, bool forceReload = false) {
         return;
     }
 
-    // Open the replacement outside step(), but retain the last output value so
-    // the audio path can make a bounded fade-out before consuming the new
-    // stream from frame zero, followed by a fade-in.
+    // Open the replacement outside step(). When another sample is already
+    // active, keep the processor warm and run the new stream throughout a
+    // down/up gain transition instead of resetting into a long wet-path gap.
     const bool fadeOutFirst = algorithm->samplePlaying ||
         algorithm->sampleTransitionPhase != kSampleTransitionNone;
+    const bool preserveProcessorState = algorithm->samplePlaying &&
+        algorithm->sampleReady && !algorithm->processorFaulted;
     const float oldLeft = algorithm->lastOutputLeft;
     const float oldRight = algorithm->lastOutputRight;
     invalidateSamplePlayback(algorithm);
-    resetProcessor(algorithm, false);
+    if (!preserveProcessorState) {
+        resetProcessor(algorithm, false);
+    }
 
     SampleStreamSpec spec{};
     spec.folder = folder;
@@ -584,6 +590,9 @@ void openSelectedSample(Algorithm* algorithm, bool forceReload = false) {
                  sizeof(spec.name) - 1U);
     spec.name[sizeof(spec.name) - 1U] = '\0';
     const bool opened = openSampleStream(algorithm, spec);
+    if (!opened && preserveProcessorState) {
+        resetProcessor(algorithm, false);
+    }
     beginSampleTransition(algorithm, fadeOutFirst, opened, oldLeft, oldRight);
 }
 
@@ -826,7 +835,7 @@ uint32_t renderStreamedSample(Algorithm* algorithm, int frames) {
     return total;
 }
 
-void renderSampleFadeOut(Algorithm* algorithm, int frames) {
+void renderStoppedSampleFadeOut(Algorithm* algorithm, int frames) {
     std::memset(algorithm->scratchLeft, 0,
                 static_cast<std::size_t>(frames) * sizeof(float));
     std::memset(algorithm->scratchRight, 0,
@@ -853,21 +862,39 @@ void renderSampleFadeOut(Algorithm* algorithm, int frames) {
     }
 }
 
-void applySampleFadeIn(Algorithm* algorithm, int frames) {
+void applySampleStreamTransition(Algorithm* algorithm, int frames) {
     const float reciprocal = 1.0f /
         static_cast<float>(algorithm->sampleTransitionFrames);
-    for (int i = 0; i < frames &&
-         algorithm->sampleTransitionFrame < algorithm->sampleTransitionFrames;
-         ++i, ++algorithm->sampleTransitionFrame) {
-        const float gain = static_cast<float>(
-            algorithm->sampleTransitionFrame + 1U) * reciprocal;
+    for (int i = 0; i < frames; ++i) {
+        float gain = 1.0f;
+        if (algorithm->sampleTransitionPhase == kSampleTransitionFadeOut) {
+            const uint32_t remaining = algorithm->sampleTransitionFrames -
+                algorithm->sampleTransitionFrame - 1U;
+            gain = static_cast<float>(remaining) * reciprocal;
+            ++algorithm->sampleTransitionFrame;
+            if (algorithm->sampleTransitionFrame >=
+                algorithm->sampleTransitionFrames) {
+                algorithm->sampleTransitionFrame = 0U;
+                algorithm->sampleTransitionPhase =
+                    algorithm->sampleTransitionFadeInPending
+                        ? kSampleTransitionFadeIn : kSampleTransitionNone;
+                algorithm->sampleTransitionFadeInPending = false;
+            }
+        } else if (algorithm->sampleTransitionPhase ==
+                   kSampleTransitionFadeIn) {
+            gain = static_cast<float>(
+                algorithm->sampleTransitionFrame + 1U) * reciprocal;
+            ++algorithm->sampleTransitionFrame;
+            if (algorithm->sampleTransitionFrame >=
+                algorithm->sampleTransitionFrames) {
+                algorithm->sampleTransitionFrame = 0U;
+                algorithm->sampleTransitionPhase = kSampleTransitionNone;
+            }
+        } else {
+            break;
+        }
         algorithm->scratchLeft[i] *= gain;
         algorithm->scratchRight[i] *= gain;
-    }
-    if (algorithm->sampleTransitionFrame >=
-        algorithm->sampleTransitionFrames) {
-        algorithm->sampleTransitionFrame = 0U;
-        algorithm->sampleTransitionPhase = kSampleTransitionNone;
     }
 }
 
@@ -885,14 +912,16 @@ void step(_NT_algorithm* base, float* busFrames, int numFramesBy4) {
     // the same confirmed Capicola control surface.
     applyProcessingControls(algorithm);
 
-    const bool sampleFadingOut = algorithm->activeSource == kSourceSample &&
-        algorithm->sampleTransitionPhase == kSampleTransitionFadeOut;
+    const bool stoppedSampleFadingOut =
+        algorithm->activeSource == kSourceSample &&
+        algorithm->sampleTransitionPhase == kSampleTransitionFadeOut &&
+        !algorithm->sampleTransitionFadeInPending;
     const float* left = nullptr;
     const float* right = nullptr;
-    bool sourceAvailable = !sampleFadingOut;
-    if (sampleFadingOut) {
-        // The replacement stream is already open, but remains at frame zero
-        // until the old output has reached silence.
+    bool sourceAvailable = !stoppedSampleFadingOut;
+    if (stoppedSampleFadingOut) {
+        // A missing or refused replacement has no stream to render. Retain a
+        // bounded fade of the last valid output instead of cutting it off.
     } else if (algorithm->activeSource == kSourceLive) {
         const int leftInputBus = algorithm->v[kParamLeftInput];
         const int rightInputBus = algorithm->v[kParamRightInput];
@@ -930,15 +959,15 @@ void step(_NT_algorithm* base, float* busFrames, int numFramesBy4) {
             algorithm->processorFaulted = true;
         }
     }
-    if (sampleFadingOut) {
-        renderSampleFadeOut(algorithm, frames);
+    if (stoppedSampleFadingOut) {
+        renderStoppedSampleFadeOut(algorithm, frames);
         rendered = false;
     } else if (!rendered) {
         fadeToSilence(algorithm->scratchLeft, algorithm->scratchRight, frames,
                       algorithm->lastOutputLeft, algorithm->lastOutputRight);
     } else if (algorithm->activeSource == kSourceSample &&
-               algorithm->sampleTransitionPhase == kSampleTransitionFadeIn) {
-        applySampleFadeIn(algorithm, frames);
+               algorithm->sampleTransitionPhase != kSampleTransitionNone) {
+        applySampleStreamTransition(algorithm, frames);
     }
     algorithm->lastOutputLeft = algorithm->scratchLeft[frames - 1];
     algorithm->lastOutputRight = algorithm->scratchRight[frames - 1];

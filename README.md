@@ -118,10 +118,12 @@ the full file instead of copying it into a large memory buffer. Use a
 loop-prepared file when the wrap point needs to be seamless; Capicola does not
 edit loop points or add a boundary crossfade.
 
-When a different sample is opened, Capicola fades the current output to silence
-over 5 ms, starts the replacement stream at its first frame, and fades it in
-over 5 ms. This fixed click-safety transition is separate from the **Fade**
-processing control.
+When a different sample is opened, Capicola starts running it through the
+already-warm processing engine while fading down over 50 ms, then fades back in
+over 50 ms. Only the transition midpoint reaches silence; there is no additional
+silent block while the new sample or processing engine starts. The first 50 ms
+of the replacement sample is therefore heard at a falling level. This fixed
+click-safety transition is separate from the **Fade** processing control.
 
 The Source, Folder, and Sample selections are ordinary NT preset parameters.
 Keep the SD sample catalogue stable when a preset depends on a sample. If the

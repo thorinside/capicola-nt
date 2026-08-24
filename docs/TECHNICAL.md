@@ -63,11 +63,15 @@ All twelve continuous processing controls remain ordinary host parameters on
 the Performance page.
 
 Replacing or explicitly reopening a sample starts a fixed two-phase safety
-transition. The old output value ramps to silence over 5 ms while the newly
-opened stream remains at frame zero; the new processed stream then ramps to
-unity over 5 ms. The counters and held stereo values live in the instance, and
-the per-sample work is bounded. This transition does not alter the user-facing
-**Fade** processing parameter.
+transition. The already-warm Capicola processor is preserved across a valid
+sample-to-sample replacement. The new stream runs from frame zero while output
+gain falls to zero over 50 ms and rises to unity over the next 50 ms. The two
+phases meet inside the same audio block, so only one midpoint sample is forced
+to zero and there is no cold-engine or block-boundary silence gap. The counters
+and failure-path held stereo values live in the instance, and the per-sample
+work is bounded. This transition does not alter the user-facing **Fade**
+processing parameter. Entering Sample mode from another source still resets the
+engine at that source boundary.
 
 ## Pinned source and platform
 

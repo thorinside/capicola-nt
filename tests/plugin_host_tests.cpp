@@ -755,9 +755,9 @@ int main() {
         }
     };
     auto settleSampleTransition = [&]() {
-        // Each replacement uses a 5 ms (240-frame) fade-out and a matching
-        // fade-in. Eight 64-frame blocks cover both phases at 48 kHz.
-        for (int block = 0; block < 8; ++block) {
+        // Each replacement uses a 50 ms (2400-frame) fade-out and a matching
+        // fade-in. Seventy-five 64-frame blocks cover both phases at 48 kHz.
+        for (int block = 0; block < 75; ++block) {
             factory->step(algorithm, buses.data(), kFrames / 4);
         }
     };
@@ -918,11 +918,10 @@ int main() {
         return fail("host-mapped Mix value did not modulate Capicola processing");
     }
 
-    // A folder change opens the new stream outside step(). The audio path then
-    // spends 5 ms fading the old output to silence without advancing the new
-    // stream, followed by a 5 ms fade-in from the new sample's frame zero.
-    const float previousLeft = buses[12 * kFrames + kFrames - 1];
-    const float previousRight = buses[13 * kFrames + kFrames - 1];
+    // A wet folder change keeps the already-running processor warm while the
+    // replacement stream advances through a 50 ms fade-out and 50 ms fade-in.
+    // Only the single midpoint sample may be forced to zero; there must be no
+    // cold-engine silence between the samples.
     const uint32_t opensBeforeFolderChange = gStreamOpenCalls;
     const uint32_t rendersBeforeFolderChange = gStreamRenderCalls;
     values[folder] = 1;
@@ -934,32 +933,40 @@ int main() {
         gOpenedFolder != 1 || gOpenedSample != 0) {
         return fail("folder change did not synchronize and open its valid sample");
     }
-    values[mix] = 0;
-    constexpr int kSampleFadeFrames = 240;
-    for (int block = 0; block < 4; ++block) {
-        factory->step(algorithm, buses.data(), kFrames / 4);
-        if (gStreamRenderCalls != rendersBeforeFolderChange) {
-            return fail("replacement stream advanced during its fade-out");
-        }
-        for (int i = 0; i < kFrames; ++i) {
-            const int transitionFrame = block * kFrames + i;
-            const float gain = transitionFrame < kSampleFadeFrames
-                ? static_cast<float>(kSampleFadeFrames - transitionFrame - 1) /
-                    static_cast<float>(kSampleFadeFrames)
-                : 0.0f;
-            if (std::fabs(buses[12 * kFrames + i] - previousLeft * gain) >
-                    1.0e-5f ||
-                std::fabs(buses[13 * kFrames + i] - previousRight * gain) >
-                    1.0e-5f) {
-                return fail("sample replacement did not fade the old output to silence");
-            }
-        }
-    }
-    for (int block = 0; block < 4; ++block) {
+    int consecutiveSilentFrames = 0;
+    int longestSilentRun = 0;
+    for (int block = 0; block < 75; ++block) {
         factory->step(algorithm, buses.data(), kFrames / 4);
         if (gStreamRenderCalls != rendersBeforeFolderChange +
                 static_cast<uint32_t>(block + 1)) {
-            return fail("replacement stream did not begin after its fade-out");
+            return fail("replacement stream stopped during the wet transition");
+        }
+        for (int i = 0; i < kFrames; ++i) {
+            const bool silent = buses[12 * kFrames + i] == 0.0f &&
+                                buses[13 * kFrames + i] == 0.0f;
+            consecutiveSilentFrames = silent ? consecutiveSilentFrames + 1 : 0;
+            if (consecutiveSilentFrames > longestSilentRun) {
+                longestSilentRun = consecutiveSilentFrames;
+            }
+        }
+    }
+    if (longestSilentRun > 2) {
+        return fail("wet sample replacement retained a cold-engine silence gap");
+    }
+
+    // Reopen the same sample at dry Mix so the exact two-phase gain and source
+    // position can be checked. The new stream is consumed throughout both
+    // phases and crosses zero for exactly one sample without waiting for a new
+    // audio block.
+    values[mix] = 0;
+    pressSampleLoad();
+    const uint32_t rendersBeforeDryTransition = gStreamRenderCalls;
+    constexpr int kSampleFadeFrames = 2400;
+    for (int block = 0; block < 75; ++block) {
+        factory->step(algorithm, buses.data(), kFrames / 4);
+        if (gStreamRenderCalls != rendersBeforeDryTransition +
+                static_cast<uint32_t>(block + 1)) {
+            return fail("replacement stream did not run throughout its transition");
         }
         for (int i = 0; i < kFrames; ++i) {
             const int transitionFrame = block * kFrames + i;
@@ -972,14 +979,16 @@ int main() {
                 2.0f * kPi * 330.0f * static_cast<float>(index + 1U) /
                 24000.0f);
             const float fadeGain = transitionFrame < kSampleFadeFrames
-                ? static_cast<float>(transitionFrame + 1) /
+                ? static_cast<float>(kSampleFadeFrames - transitionFrame - 1) /
                     static_cast<float>(kSampleFadeFrames)
-                : 1.0f;
+                : static_cast<float>(
+                    transitionFrame - kSampleFadeFrames + 1) /
+                    static_cast<float>(kSampleFadeFrames);
             const float expected = 8.0f *
                 (source0 + fraction * (source1 - source0)) * fadeGain;
             if (std::fabs(buses[12 * kFrames + i] - expected) > 1.0e-5f ||
                 buses[12 * kFrames + i] != buses[13 * kFrames + i]) {
-                return fail("new sample did not fade in from its first frame");
+                return fail("sample replacement gain or stream position was discontinuous");
             }
         }
     }
@@ -1018,6 +1027,15 @@ int main() {
     const uint32_t rendersBeforeLoopStep = gStreamRenderCalls;
     factory->step(algorithm, buses.data(), kFrames / 4);
     for (int i = 0; i < kFrames; ++i) {
+        const float expected = 8.0f * std::sin(
+            2.0f * kPi * 330.0f * static_cast<float>(i) / 48000.0f);
+        if (std::fabs(buses[12 * kFrames + i] - expected) > 1.0e-6f ||
+            buses[12 * kFrames + i] != buses[13 * kFrames + i]) {
+            return fail("sample stream did not restart from its loop boundary");
+        }
+    }
+    factory->step(algorithm, buses.data(), kFrames / 4);
+    for (int i = 0; i < kFrames; ++i) {
         const uint32_t sourceIndex = i < 32
             ? 64U + static_cast<uint32_t>(i)
             : static_cast<uint32_t>(i - 32);
@@ -1030,8 +1048,8 @@ int main() {
     }
     gDrawnText.clear();
     factory->draw(algorithm);
-    if (gStreamOpenCalls != opensBeforeLoopStep + 1 ||
-        gStreamRenderCalls != rendersBeforeLoopStep + 2 ||
+    if (gStreamOpenCalls != opensBeforeLoopStep + 2 ||
+        gStreamRenderCalls != rendersBeforeLoopStep + 3 ||
         !drawnTextContains("CAPICOLA") ||
         !drawnTextContains("Mono")) {
         return fail("sample stream loop or compact title was not retained");
@@ -1074,7 +1092,7 @@ int main() {
     pressSampleLoad();
     factory->step(algorithm, buses.data(), kFrames / 4);
     if (gStreamOpenCalls != opensBeforeRemount + 1 ||
-        gStreamRenderCalls != rendersBeforeRemount + 2 ||
+        gStreamRenderCalls != rendersBeforeRemount + 3 ||
         gOpenedFolder != 1 || gOpenedSample != 0) {
         return fail("explicit sample LOAD did not recover after remount");
     }
