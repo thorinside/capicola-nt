@@ -39,6 +39,10 @@ enum Parameter {
     kParamDriveCharacter,
     kParamMix,
     kParamFeedbackTone,
+    kParamInputTransientOutput,
+    kParamOutputTransientOutput,
+    kParamInputEnvelopeOutput,
+    kParamOutputEnvelopeOutput,
     kNumParameters,
 };
 
@@ -86,6 +90,10 @@ static const _NT_parameter kParameterTemplate[] = {
      .unit = kNT_unitPercent, .scaling = 0, .enumStrings = nullptr},
     {.name = "Feedback Tone", .min = 0, .max = 10000, .def = 3769,
      .unit = kNT_unitPercent, .scaling = kNT_scaling100, .enumStrings = nullptr},
+    NT_PARAMETER_CV_OUTPUT("Input Transient output", 0, 0)
+    NT_PARAMETER_CV_OUTPUT("Output Transient output", 0, 0)
+    NT_PARAMETER_CV_OUTPUT("Input Envelope output", 0, 0)
+    NT_PARAMETER_CV_OUTPUT("Output Envelope output", 0, 0)
 };
 
 static const uint8_t kPerformanceParameters[] = {
@@ -116,6 +124,10 @@ static const uint8_t kRoutingParameters[] = {
     kParamLeftOutputMode,
     kParamRightOutput,
     kParamRightOutputMode,
+    kParamInputTransientOutput,
+    kParamOutputTransientOutput,
+    kParamInputEnvelopeOutput,
+    kParamOutputEnvelopeOutput,
 };
 
 static const _NT_parameterPage kPages[] = {
@@ -424,6 +436,21 @@ void writeOutput(float* destination,
     }
 }
 
+void writeAnalysisCv(float* busFrames,
+                     int frames,
+                     int selectedBus,
+                     float voltage) {
+    // Zero is the explicit disconnected value. Validate it before converting
+    // the host's one-based bus number to a buffer index.
+    if (selectedBus < 1 || selectedBus > kNT_lastBus) {
+        return;
+    }
+    float* destination = busFrames + (selectedBus - 1) * frames;
+    for (int i = 0; i < frames; ++i) {
+        destination[i] = voltage;
+    }
+}
+
 void step(_NT_algorithm* base, float* busFrames, int numFramesBy4) {
     Algorithm* algorithm = static_cast<Algorithm*>(base);
     const int frames = numFramesBy4 * 4;
@@ -491,6 +518,19 @@ void step(_NT_algorithm* base, float* busFrames, int numFramesBy4) {
                 algorithm->scratchRight,
                 frames,
                 algorithm->v[kParamRightOutputMode] != 0);
+
+    writeAnalysisCv(busFrames, frames,
+                    algorithm->v[kParamInputTransientOutput],
+                    algorithm->processor->inputTransient() ? 5.0f : 0.0f);
+    writeAnalysisCv(busFrames, frames,
+                    algorithm->v[kParamOutputTransientOutput],
+                    algorithm->processor->outputTransient() ? 5.0f : 0.0f);
+    writeAnalysisCv(busFrames, frames,
+                    algorithm->v[kParamInputEnvelopeOutput],
+                    5.0f * algorithm->processor->inputEnvelope());
+    writeAnalysisCv(busFrames, frames,
+                    algorithm->v[kParamOutputEnvelopeOutput],
+                    5.0f * algorithm->processor->outputEnvelope());
 }
 
 bool draw(_NT_algorithm* base) {

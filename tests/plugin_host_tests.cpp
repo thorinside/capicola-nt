@@ -189,12 +189,35 @@ int main() {
     const int driveCharacter = findParameter(algorithm, count, "Drive Character");
     const int mix = findParameter(algorithm, count, "Mix");
     const int feedbackTone = findParameter(algorithm, count, "Feedback Tone");
+    const int inputTransientOutput = findParameter(
+        algorithm, count, "Input Transient output");
+    const int outputTransientOutput = findParameter(
+        algorithm, count, "Output Transient output");
+    const int inputEnvelopeOutput = findParameter(
+        algorithm, count, "Input Envelope output");
+    const int outputEnvelopeOutput = findParameter(
+        algorithm, count, "Output Envelope output");
     if (leftInput < 0 || rightInput < 0 || leftOutput < 0 || leftMode < 0 ||
         rightOutput < 0 || rightMode < 0 || source < 0 || folder < 0 || sample < 0 ||
         pitch < 0 || stretch < 0 || threshold < 0 || grain < 0 || quality < 0 ||
         feedback < 0 || envelopeSmoothing < 0 || fade < 0 || drive < 0 ||
-        driveCharacter < 0 || mix < 0 || feedbackTone < 0) {
+        driveCharacter < 0 || mix < 0 || feedbackTone < 0 ||
+        inputTransientOutput < 0 || outputTransientOutput < 0 ||
+        inputEnvelopeOutput < 0 || outputEnvelopeOutput < 0) {
         return fail("expected performance, source, and routing parameters are unavailable");
+    }
+
+    const int analysisOutputs[] = {
+        inputTransientOutput, outputTransientOutput,
+        inputEnvelopeOutput, outputEnvelopeOutput,
+    };
+    for (int parameter : analysisOutputs) {
+        const _NT_parameter& definition = algorithm->parameters[parameter];
+        if (definition.unit != kNT_unitCvOutput || definition.min != 0 ||
+            definition.def != 0 || definition.max != kNT_lastBus ||
+            !pageContains(algorithm->parameterPages, "Routing", parameter)) {
+            return fail("analysis CV selector is not default-disconnected routing");
+        }
     }
 
     const int auditedControls[] = {
@@ -289,6 +312,22 @@ int main() {
     factory->parameterChanged(algorithm, mix);
 
     std::vector<float> buses(kNT_lastBus * kFrames, 0.0f);
+    // No analysis bus may be claimed on first load while all four selectors
+    // retain their zero defaults.
+    for (int bus = 14; bus < 18; ++bus) {
+        std::fill_n(buses.data() + bus * kFrames, kFrames,
+                    10.0f + static_cast<float>(bus));
+    }
+    factory->step(algorithm, buses.data(), kFrames / 4);
+    for (int bus = 14; bus < 18; ++bus) {
+        for (int i = 0; i < kFrames; ++i) {
+            if (buses[bus * kFrames + i] != 10.0f + static_cast<float>(bus)) {
+                return fail("default-disconnected analysis selector claimed a bus");
+            }
+        }
+    }
+    std::fill(buses.begin(), buses.end(), 0.0f);
+
     int clock = 0;
     for (int block = 0; block < 300; ++block) {
         float* left = buses.data();
@@ -304,6 +343,58 @@ int main() {
             }
         }
     }
+
+    // Assign every audited signal to a separate CV bus. Gates are exactly 0/5 V
+    // and normalized envelopes remain in 0..5 V. Repeated impulses guarantee
+    // both input- and post-mix-output detector activity is observed.
+    values[inputTransientOutput] = 15;
+    values[outputTransientOutput] = 16;
+    values[inputEnvelopeOutput] = 17;
+    values[outputEnvelopeOutput] = 18;
+    bool sawInputTransient = false;
+    bool sawOutputTransient = false;
+    bool sawInputEnvelope = false;
+    bool sawOutputEnvelope = false;
+    for (int block = 0; block < 360; ++block) {
+        std::fill(buses.begin(), buses.end(), 0.0f);
+        float* left = buses.data();
+        if (block % 12 == 0) left[0] = 1.0f;
+        factory->step(algorithm, buses.data(), kFrames / 4);
+        const float inputGate = buses[14 * kFrames];
+        const float outputGate = buses[15 * kFrames];
+        const float inputEnvelope = buses[16 * kFrames];
+        const float outputEnvelope = buses[17 * kFrames];
+        if ((inputGate != 0.0f && inputGate != 5.0f) ||
+            (outputGate != 0.0f && outputGate != 5.0f) ||
+            inputEnvelope < 0.0f || inputEnvelope > 5.0f ||
+            outputEnvelope < 0.0f || outputEnvelope > 5.0f) {
+            return fail("analysis CV output exceeded its audited voltage range");
+        }
+        sawInputTransient = sawInputTransient || inputGate == 5.0f;
+        sawOutputTransient = sawOutputTransient || outputGate == 5.0f;
+        sawInputEnvelope = sawInputEnvelope || inputEnvelope > 0.0f;
+        sawOutputEnvelope = sawOutputEnvelope || outputEnvelope > 0.0f;
+    }
+    if (!sawInputTransient || !sawOutputTransient ||
+        !sawInputEnvelope || !sawOutputEnvelope) {
+        return fail("an assigned analysis signal did not reach its CV bus");
+    }
+
+    // Selecting 0 disconnects every assignment immediately and leaves each
+    // previously selected physical/auxiliary bus untouched.
+    for (int parameter : analysisOutputs) values[parameter] = 0;
+    for (int bus = 14; bus < 18; ++bus) {
+        std::fill_n(buses.data() + bus * kFrames, kFrames, 23.0f);
+    }
+    factory->step(algorithm, buses.data(), kFrames / 4);
+    for (int bus = 14; bus < 18; ++bus) {
+        for (int i = 0; i < kFrames; ++i) {
+            if (buses[bus * kFrames + i] != 23.0f) {
+                return fail("selector 0 did not disconnect an analysis CV output");
+            }
+        }
+    }
+    std::fill(buses.begin(), buses.end(), 0.0f);
 
     // Select the host-catalogued stereo sample. NaN on both live buses proves
     // that sample mode does not read or mix either live source.

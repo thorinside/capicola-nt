@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstddef>
 
+#include "Detector.h"
 #include "KeyframeRecorder.h"
 #include "Shapers.h"
 #include "filter.h"
@@ -50,8 +51,13 @@ public:
                 feedback_[channel][i] = 0.0f;
             }
         }
+        outputDetector_.Init();
         feedbackAmount_ = 0.0f;
         mix_ = 1.0f;
+        inputEnvelope_ = 0.0f;
+        outputEnvelope_ = 0.0f;
+        inputTransient_ = false;
+        outputTransient_ = false;
     }
 
     void setPitchSemitones(float semitones) {
@@ -81,6 +87,7 @@ public:
 
     void setEnvelopeSmoothing(float cutoff) {
         for (auto& channel : channels_) channel.SetTkeoCutoff(cutoff);
+        outputDetector_.SetCutoff(cutoff);
     }
 
     void setFade(float frames) {
@@ -106,6 +113,11 @@ public:
     void triggerSlice() {
         for (auto& channel : channels_) channel.SubmitRequest(capicola::Request::SLICE);
     }
+
+    bool inputTransient() const { return inputTransient_; }
+    bool outputTransient() const { return outputTransient_; }
+    float inputEnvelope() const { return inputEnvelope_; }
+    float outputEnvelope() const { return outputEnvelope_; }
 
     void process(const float* left,
                  const float* right,
@@ -143,17 +155,44 @@ public:
                                       dry * inputs[channel][i];
             }
         }
+
+        // Mirror Capicola's audited panel/CV analysis: the output detector sees
+        // the post-mix mono sum while the input analysis comes from the linked
+        // per-channel recorders.
+        for (std::size_t i = 0; i < frames; ++i) {
+            outputDetector_.Analyze(outLeft[i] + outRight[i]);
+        }
+        const float leftEnvelope = channels_[0].TkeoEnvelope();
+        const float rightEnvelope = channels_[1].TkeoEnvelope();
+        inputEnvelope_ = normalizeEnvelope(
+            leftEnvelope > rightEnvelope ? leftEnvelope : rightEnvelope);
+        outputEnvelope_ = normalizeEnvelope(outputDetector_.Envelope());
+        inputTransient_ = channels_[0].DetectorGate() ||
+                          channels_[1].DetectorGate();
+        outputTransient_ = outputDetector_.Gate();
     }
 
 private:
+    static float normalizeEnvelope(float envelope) {
+        float normalized = envelope * 200.0f;
+        if (normalized < 0.0f) normalized = 0.0f;
+        if (normalized > 1.0f) normalized = 1.0f;
+        return std::sqrt(normalized);
+    }
+
     capicola::Shapers shapers_;
     bool shapersInitialized_ = false;
     capicola::KeyframeRecorder<RingFrames> channels_[2];
     capicola::StateVariable feedbackFilters_[2];
+    capicola::Detector outputDetector_;
     float feedback_[2][MaxBlockFrames];
     float injected_[2][MaxBlockFrames];
     float feedbackAmount_;
     float mix_;
+    float inputEnvelope_;
+    float outputEnvelope_;
+    bool inputTransient_;
+    bool outputTransient_;
 };
 
 } // namespace capicola_nt
