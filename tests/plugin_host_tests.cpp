@@ -166,6 +166,9 @@ int main() {
     if (factory == nullptr || pluginEntry(kNT_selector_version, 0) != kNT_apiVersion13) {
         return fail("API v13 factory is unavailable");
     }
+    if (factory->guid != NT_MULTICHAR('T', 'h', 'C', 'a')) {
+        return fail("factory GUID is not the stable ThCa release identity");
+    }
 
     _NT_algorithmRequirements requirements{};
     factory->calculateRequirements(requirements, nullptr);

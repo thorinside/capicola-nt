@@ -721,7 +721,7 @@ void setupUi(_NT_algorithm* base, _NT_float3& pots) {
 }
 
 static const _NT_factory kFactory = {
-    .guid = NT_MULTICHAR('C', 'a', 'N', 'T'),
+    .guid = NT_MULTICHAR('T', 'h', 'C', 'a'),
     .name = "Capicola",
     .description = "Capicola live/sample stereo processor",
     .numSpecifications = 0,
