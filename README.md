@@ -21,8 +21,10 @@ The ARM plugin object is written to `build/plugins/capicola.o`.
 
 Capicola for disting NT and the incorporated Capicola DSP are free software released under the **GNU Affero General Public License, version 3** (`AGPL-3.0-only`). There is no warranty. See [LICENSE](LICENSE) for the complete terms, [NOTICE](NOTICE) and [third-party notices](THIRD_PARTY_NOTICES.md) for attribution, and the completed [license audit](docs/LICENSE_AUDIT.md) for the audited obligations.
 
-Each object-code release must offer the explicitly attached `capicola-nt-source.tar.gz` corresponding-source archive at no extra charge. GitHub's automatic source snapshots omit submodule contents and are not a substitute. See the [corresponding-source instructions](docs/SOURCE_OFFER.md). Release maintainers build and check the archive with:
+Each object-code release must offer the explicitly attached `capicola-nt-source.tar.gz` corresponding-source archive at no extra charge. GitHub's automatic source snapshots omit submodule contents and are not a substitute. See the [corresponding-source instructions](docs/SOURCE_OFFER.md). Release maintainers build and check both adjacent release assets with:
 
 ```sh
-make source-package
+make release-assets
 ```
+
+After explicit owner approval, pushing a `v*` tag runs the release workflow, which publishes `capicola.o` and `capicola-nt-source.tar.gz` together and links the license, notice, attribution, source-access, and pinned-provenance materials in the release notes.

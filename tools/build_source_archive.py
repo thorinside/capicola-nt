@@ -72,6 +72,13 @@ def provenance() -> bytes:
         lines.append(
             f"{submodule}={run(ROOT / submodule, 'git', 'rev-parse', 'HEAD')}"
         )
+    for line in run(ROOT / "vendor/capicola", "git", "ls-files", "--stage").splitlines():
+        metadata, path = line.split("\t", 1)
+        mode, object_id, stage = metadata.split()
+        if mode == "160000" and stage == "0":
+            lines.append(
+                f"vendor/capicola/{path}={object_id} (gitlink only; not used by plugin)"
+            )
     lines.extend(
         (
             "license=AGPL-3.0-only",
@@ -100,8 +107,14 @@ def main() -> None:
         names = set(archive.getnames())
         required = {
             f"{PREFIX}/LICENSE",
+            f"{PREFIX}/LICENSES/distingNT_API-MIT.txt",
             f"{PREFIX}/NOTICE",
+            f"{PREFIX}/THIRD_PARTY_NOTICES.md",
+            f"{PREFIX}/SUBMODULES.lock",
             f"{PREFIX}/Makefile",
+            f"{PREFIX}/.github/workflows/release.yml",
+            f"{PREFIX}/docs/LICENSE_AUDIT.md",
+            f"{PREFIX}/docs/SOURCE_OFFER.md",
             f"{PREFIX}/src/capicola_nt.cpp",
             f"{PREFIX}/vendor/capicola/LICENSE",
             f"{PREFIX}/vendor/capicola/lib/KeyframeRecorder.h",
@@ -112,6 +125,12 @@ def main() -> None:
         missing = required - names
         if missing:
             raise SystemExit(f"source archive is incomplete: {sorted(missing)}")
+        source_provenance = archive.extractfile(
+            f"{PREFIX}/SOURCE_PROVENANCE.txt"
+        ).read().decode("utf-8")
+        expected_provenance = provenance().decode("utf-8")
+        if source_provenance != expected_provenance:
+            raise SystemExit("source archive provenance does not match the release checkout")
 
     digest = run(ROOT, "shasum", "-a", "256", str(OUTPUT)).split()[0]
     print(f"built {OUTPUT.relative_to(ROOT)} sha256={digest}")

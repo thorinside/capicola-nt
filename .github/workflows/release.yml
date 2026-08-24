@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the tagged source and vendor trees
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Install the Arm GNU toolchain
+        run: sudo apt-get update && sudo apt-get install --yes gcc-arm-none-eabi
+
+      - name: Verify the release commit
+        run: make clean verify
+
+      - name: Build and verify corresponding source
+        run: make source-package
+
+      - name: Prepare release notices
+        shell: bash
+        run: |
+          cat > build/release/release-notes.md <<EOF
+          Capicola for disting NT is an independently maintained wrapper around [Capicola](https://github.com/heavylight-industries/capicola), not an official Heavylight Industries release.
+
+          **License:** GNU Affero General Public License, version 3 (AGPL-3.0-only). There is no warranty.
+
+          Download both adjacent release assets:
+          - \`capicola.o\` — installable disting NT plugin object
+          - \`capicola-nt-source.tar.gz\` — complete Corresponding Source, including the pinned Capicola and distingNT API trees and \`SOURCE_PROVENANCE.txt\`
+
+          GitHub's automatic source snapshots omit submodule contents and are not the Corresponding Source download. The explicitly attached source archive is available at no additional charge.
+
+          Release materials: [LICENSE](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/LICENSE) · [NOTICE](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/NOTICE) · [third-party attribution](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/THIRD_PARTY_NOTICES.md) · [source and installation information](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/docs/SOURCE_OFFER.md) · [pinned submodule provenance](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/SUBMODULES.lock)
+          EOF
+
+      - name: Publish the approved tagged release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            build/plugins/capicola.o \
+            build/release/capicola-nt-source.tar.gz \
+            --verify-tag \
+            --title "Capicola for disting NT ${GITHUB_REF_NAME}" \
+            --notes-file build/release/release-notes.md

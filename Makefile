@@ -5,7 +5,7 @@ BUILD_DIR ?= build
 PLUGIN := $(BUILD_DIR)/plugins/capicola.o
 COMMON_INCLUDES := -Iinclude -Ivendor/capicola/lib
 
-.PHONY: all clean verify verify-audit verify-license test-upstream test-live plugin inspect-plugin source-package
+.PHONY: all clean verify verify-audit verify-license test-upstream test-live plugin inspect-plugin source-package release-assets
 
 all: plugin
 
@@ -55,6 +55,9 @@ inspect-plugin: $(PLUGIN)
 
 source-package: verify-license
 	python3 tools/build_source_archive.py
+
+# These are the two adjacent downloadable assets for an approved tagged release.
+release-assets: verify source-package
 
 clean:
 	rm -rf "$(BUILD_DIR)"

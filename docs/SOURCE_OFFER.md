@@ -4,7 +4,7 @@ Capicola for disting NT is free software released under the GNU Affero General P
 
 ## Getting the exact source
 
-Every public object-code release must provide `capicola-nt-source.tar.gz` beside the plugin download, at no additional charge. The source archive is the preferred form for modification and contains:
+Every public object-code release provides `capicola-nt-source.tar.gz` beside the `capicola.o` plugin download, at no additional charge. The tag-only release workflow attaches both files to the same GitHub release and links these license, notice, attribution, source-access, and provenance materials in its release notes. The source archive is the preferred form for modification and contains:
 
 - all wrapper source, tests, documentation, and build scripts;
 - the complete pinned Capicola source used by the plugin;
@@ -38,3 +38,7 @@ This creates `build/plugins/capicola.o` without a network checkout. The maintain
 Copy the object to `/programs/plug-ins/capicola.o` on the disting NT MicroSD card using the normal user-accessible plugin installation workflow, then scan/load the plugin on a compatible module. No project-specific authorization key or password is required to build or install a modified object. Firmware compatibility remains limited to the baseline documented for the release.
 
 For source-access problems, use the release repository's public issue tracker and include the release tag, archive filename, and observed error.
+
+## Release maintainer check
+
+An owner-approved `v*` tag triggers `.github/workflows/release.yml`. Before tagging, run `make release-assets`; after the workflow succeeds, download both assets from the public release and verify them. Tagging and publication require explicit owner approval.

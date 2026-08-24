@@ -106,7 +106,32 @@ def main() -> None:
     )
     require_text(
         "docs/SOURCE_OFFER.md",
-        ("capicola-nt-source.tar.gz", "do **not** expand Git submodules"),
+        (
+            "capicola-nt-source.tar.gz",
+            "do **not** expand Git submodules",
+            "owner-approved `v*` tag",
+        ),
+    )
+    require_text(
+        ".github/workflows/release.yml",
+        (
+            'tags:\n      - "v*"',
+            "make clean verify",
+            "make source-package",
+            "build/plugins/capicola.o",
+            "build/release/capicola-nt-source.tar.gz",
+            "gh release create",
+            "--verify-tag",
+            "LICENSE",
+            "NOTICE",
+            "THIRD_PARTY_NOTICES.md",
+            "docs/SOURCE_OFFER.md",
+            "SUBMODULES.lock",
+        ),
+    )
+    require_text(
+        "Makefile",
+        ("release-assets: verify source-package",),
     )
 
     for source in ("src/capicola_nt.cpp", "include/capicola_nt/live_path.h"):

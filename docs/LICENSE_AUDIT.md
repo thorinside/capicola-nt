@@ -47,10 +47,11 @@ A recipient can build the plugin from the archive with the documented toolchain 
 
 Before any public release:
 
-1. Run `make verify` and `make source-package` from the exact release commit.
+1. Run `make release-assets` from the exact release commit.
 2. Confirm the source archive's generated `SOURCE_PROVENANCE.txt` names that commit and both pinned vendor revisions.
-3. Attach the source archive beside the object-code release at no additional charge and keep the source link adjacent to the object download.
-4. Include or link `NOTICE`, `THIRD_PARTY_NOTICES.md`, and `docs/SOURCE_OFFER.md` in release notes.
-5. If either vendor revision changes, repeat this audit and update `SUBMODULES.lock` and the verification expectations before release.
+3. Push an owner-approved `v*` tag for that exact commit. `.github/workflows/release.yml` verifies the tag and publishes `capicola.o` and `capicola-nt-source.tar.gz` as adjacent assets of the same GitHub release.
+4. Confirm the release notes link `LICENSE`, `NOTICE`, `THIRD_PARTY_NOTICES.md`, `docs/SOURCE_OFFER.md`, and `SUBMODULES.lock` at that release commit.
+5. Download both published assets and recheck the source provenance and plugin object rather than relying only on the workflow result.
+6. If either vendor revision changes, repeat this audit and update `SUBMODULES.lock` and the verification expectations before release.
 
 These are mandatory license checks, not speculative rights-holder clearance or an invented audio-quality gate.
