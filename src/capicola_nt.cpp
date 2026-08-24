@@ -28,6 +28,7 @@ struct SampleLoadSpec {
     uint32_t frames;
     uint32_t sampleRate;
     uint32_t generation;
+    char name[kNT_parameterStringSize];
 };
 
 enum Parameter {
@@ -178,6 +179,7 @@ struct Algorithm : public _NT_algorithm {
     uint32_t loadedSampleIndex;
     float loadedSampleFraction;
     float sampleSpeed;
+    char loadedSampleName[kNT_parameterStringSize];
     bool cardMounted;
     bool sampleReady;
     bool sampleLoading;
@@ -252,6 +254,7 @@ _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& memory,
     algorithm->loadedSampleIndex = 0;
     algorithm->loadedSampleFraction = 0.0f;
     algorithm->sampleSpeed = 1.0f;
+    algorithm->loadedSampleName[0] = '\0';
     algorithm->cardMounted = NT_isSdCardMounted();
     algorithm->sampleReady = false;
     algorithm->sampleLoading = false;
@@ -280,6 +283,8 @@ _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& memory,
 }
 
 float stretchValue(int32_t value) {
+    if (value < 0) value = 0;
+    if (value > 100) value = 100;
     const float normalized = static_cast<float>(value) * 0.01f;
     return std::pow(1.0f - normalized, 2.5f);
 }
@@ -417,6 +422,7 @@ void invalidateSamplePlayback(Algorithm* algorithm) {
     algorithm->loadedSampleFrames = 0;
     algorithm->loadedSampleIndex = 0;
     algorithm->loadedSampleFraction = 0.0f;
+    algorithm->loadedSampleName[0] = '\0';
     algorithm->sampleReady = false;
     algorithm->samplePlaying = false;
     algorithm->queuedSampleLoad = false;
@@ -455,6 +461,9 @@ void sampleLoadCallback(void* callbackData, bool success) {
     algorithm->sampleReady = std::isfinite(algorithm->sampleSpeed) &&
                              algorithm->sampleSpeed > 0.0f;
     algorithm->samplePlaying = algorithm->sampleReady;
+    std::strncpy(algorithm->loadedSampleName, loaded.name,
+                 sizeof(algorithm->loadedSampleName) - 1U);
+    algorithm->loadedSampleName[sizeof(algorithm->loadedSampleName) - 1U] = '\0';
 }
 
 bool startSampleLoad(Algorithm* algorithm, const SampleLoadSpec& spec) {
@@ -552,14 +561,16 @@ void loadSelectedSample(Algorithm* algorithm, bool forceReload = false) {
     invalidateSamplePlayback(algorithm);
     resetProcessor(algorithm);
 
-    const SampleLoadSpec spec = {
-        .folder = folder,
-        .sample = sample,
-        .frames = info.numFrames > kMaxLoadedSampleFrames
-            ? kMaxLoadedSampleFrames : info.numFrames,
-        .sampleRate = info.sampleRate,
-        .generation = algorithm->selectionGeneration,
-    };
+    SampleLoadSpec spec{};
+    spec.folder = folder;
+    spec.sample = sample;
+    spec.frames = info.numFrames > kMaxLoadedSampleFrames
+        ? kMaxLoadedSampleFrames : info.numFrames;
+    spec.sampleRate = info.sampleRate;
+    spec.generation = algorithm->selectionGeneration;
+    std::strncpy(spec.name, info.name == nullptr ? "Sample" : info.name,
+                 sizeof(spec.name) - 1U);
+    spec.name[sizeof(spec.name) - 1U] = '\0';
     if (algorithm->sampleLoading) {
         algorithm->queuedSample = spec;
         algorithm->queuedSampleLoad = true;
@@ -900,6 +911,14 @@ void drawSelection(Algorithm* algorithm) {
                 10);
 }
 
+template <std::size_t N>
+void copyLiteral(char* destination, std::size_t size, const char (&source)[N]) {
+    if (size == 0) return;
+    const std::size_t count = N < size ? N : size;
+    std::memcpy(destination, source, count);
+    if (count == size) destination[size - 1U] = '\0';
+}
+
 void formatControlValue(const Algorithm* algorithm, int parameter,
                         char* text, std::size_t size) {
     const long value = static_cast<long>(algorithm->v[parameter]);
@@ -909,6 +928,22 @@ void formatControlValue(const Algorithm* algorithm, int parameter,
                       value < 0 ? '-' : '+', magnitude / 10, magnitude % 10);
     } else if (parameter == kParamGrainSize) {
         std::snprintf(text, size, "%ld", value);
+    } else if (parameter == kParamStretch) {
+        if (value >= 100) {
+            copyLiteral(text, size, "FREEZE");
+        } else {
+            const float factor = 1.0f / stretchValue(value);
+            if (factor >= 999.5f) {
+                copyLiteral(text, size, "999x+");
+            } else if (factor < 10.0f) {
+                const long tenths = static_cast<long>(factor * 10.0f + 0.5f);
+                std::snprintf(text, size, "%ld.%ldx",
+                              tenths / 10L, tenths % 10L);
+            } else {
+                std::snprintf(text, size, "%ldx",
+                              static_cast<long>(factor + 0.5f));
+            }
+        }
     } else {
         std::snprintf(text, size, "%ld%%", value);
     }
@@ -923,11 +958,20 @@ bool draw(_NT_algorithm* base) {
 
     char text[64];
     const bool sampleMode = algorithm->v[kParamSource] == kSourceSample;
-    const char* sourceState = sampleMode
-        ? (algorithm->sampleLoading ? "SAMPLE LOAD"
-           : algorithm->samplePlaying ? "SAMPLE PLAY" : "SAMPLE WAIT")
-        : "LIVE";
-    std::snprintf(text, sizeof(text), "CAPICOLA   %s", sourceState);
+    if (!sampleMode) {
+        copyLiteral(text, sizeof(text), "CAPICOLA   LIVE");
+    } else if (algorithm->sampleLoading) {
+        const SampleLoadSpec& pending = algorithm->queuedSampleLoad
+            ? algorithm->queuedSample : algorithm->loadingSample;
+        std::snprintf(text, sizeof(text), "LOADING %.54s",
+                      pending.name[0] == '\0' ? "SAMPLE" : pending.name);
+    } else if (algorithm->samplePlaying &&
+               algorithm->loadedSampleName[0] != '\0') {
+        std::strncpy(text, algorithm->loadedSampleName, sizeof(text) - 1U);
+        text[sizeof(text) - 1U] = '\0';
+    } else {
+        copyLiteral(text, sizeof(text), "SAMPLE WAIT");
+    }
     NT_drawText(0, 10, text);
 
     const int params[2][3] = {
@@ -946,20 +990,7 @@ bool draw(_NT_algorithm* base) {
         NT_drawText(x, 40, text);
     }
 
-    const float rawInputEnvelope = algorithm->processor->inputEnvelope();
-    const float rawOutputEnvelope = algorithm->processor->outputEnvelope();
-    const float safeInputEnvelope = std::isfinite(rawInputEnvelope)
-        ? std::fmin(1.0f, std::fmax(0.0f, rawInputEnvelope)) : 0.0f;
-    const float safeOutputEnvelope = std::isfinite(rawOutputEnvelope)
-        ? std::fmin(1.0f, std::fmax(0.0f, rawOutputEnvelope)) : 0.0f;
-    const long inputEnvelope = static_cast<long>(safeInputEnvelope * 99.0f + 0.5f);
-    const long outputEnvelope = static_cast<long>(safeOutputEnvelope * 99.0f + 0.5f);
-    std::snprintf(text, sizeof(text), "%s  IN %02ld%c OUT %02ld%c  MIX %ld%%",
-                  algorithm->alternateControls ? "ALT" : "MAIN",
-                  inputEnvelope,
-                  algorithm->processor->inputTransient() ? '!' : ' ',
-                  outputEnvelope,
-                  algorithm->processor->outputTransient() ? '!' : ' ',
+    std::snprintf(text, sizeof(text), "MIX %ld%%",
                   static_cast<long>(algorithm->v[kParamMix]));
     NT_drawText(0, 60, text, 12);
     return true;

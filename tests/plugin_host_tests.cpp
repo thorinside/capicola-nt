@@ -410,18 +410,29 @@ int main() {
     factory->draw(algorithm);
     if (!drawnTextContains("CAPICOLA   LIVE") ||
         !drawnTextContains("STRETCH") || !drawnTextContains("THRESH") ||
-        !drawnTextContains("FEEDBACK") || !drawnTextContains("MAIN") ||
-        !drawnTextContains("IN ") || !drawnTextContains("OUT ") ||
-        !drawnTextContains("MIX 100%")) {
-        return fail("persistent performance screen omitted source, controls, or activity");
+        !drawnTextContains("FEEDBACK") || !drawnTextContains("1.0x") ||
+        !drawnTextContains("MIX 100%") || drawnTextContains("MAIN") ||
+        drawnTextContains("IN ") || drawnTextContains("OUT ")) {
+        return fail("performance screen did not use the simplified live layout");
     }
 
     _NT_uiData ui{};
     ui.controls = kNT_potL;
+    ui.pots[0] = 0.5f;
+    factory->customUi(algorithm, ui);
+    gDrawnText.clear();
+    factory->draw(algorithm);
+    if (values[stretch] != 50 || !drawnTextContains("5.7x")) {
+        return fail("Stretch midpoint did not show its upstream time factor");
+    }
+    ui = {};
+    ui.controls = kNT_potL;
     ui.pots[0] = 1.0f;
     factory->customUi(algorithm, ui);
-    if (values[stretch] != 100) {
-        return fail("main performance pot did not control Stretch");
+    gDrawnText.clear();
+    factory->draw(algorithm);
+    if (values[stretch] != 100 || !drawnTextContains("FREEZE")) {
+        return fail("maximum Stretch did not show its true freeze state");
     }
     ui = {};
     ui.controls = kNT_potButtonL;
@@ -435,9 +446,9 @@ int main() {
     }
     gDrawnText.clear();
     factory->draw(algorithm);
-    if (!drawnTextContains("ALT") || !drawnTextContains("PITCH") ||
+    if (!drawnTextContains("PITCH") ||
         !drawnTextContains("+6.0 st") || !drawnTextContains("GRAIN") ||
-        !drawnTextContains("QUALITY")) {
+        !drawnTextContains("QUALITY") || drawnTextContains("ALT")) {
         return fail("alternate pot functions did not show their identity and value");
     }
     ui = {};
@@ -449,13 +460,14 @@ int main() {
     if (values[pitch] != -60 || !drawnTextContains("-6.0 st")) {
         return fail("negative Pitch value did not update on the performance screen");
     }
-    // Every pressable pot switches the shared MAIN/ALT performance bank.
+    // Every pressable pot switches the shared performance bank; the three
+    // visible control names identify the bank without a redundant footer tag.
     ui = {};
     ui.controls = kNT_potButtonC;
     factory->customUi(algorithm, ui);
     gDrawnText.clear();
     factory->draw(algorithm);
-    if (!drawnTextContains("MAIN") || !drawnTextContains("STRETCH")) {
+    if (!drawnTextContains("STRETCH") || drawnTextContains("MAIN")) {
         return fail("centre pot press did not restore the visible main bank");
     }
     ui = {};
@@ -463,7 +475,7 @@ int main() {
     factory->customUi(algorithm, ui);
     gDrawnText.clear();
     factory->draw(algorithm);
-    if (!drawnTextContains("ALT") || !drawnTextContains("QUALITY")) {
+    if (!drawnTextContains("QUALITY") || drawnTextContains("ALT")) {
         return fail("right pot press did not expose the visible alternate bank");
     }
     ui = {};
@@ -566,8 +578,6 @@ int main() {
     bool sawOutputTransient = false;
     bool sawInputEnvelope = false;
     bool sawOutputEnvelope = false;
-    bool screenShowedEnvelopeActivity = false;
-    bool screenShowedTransientActivity = false;
     for (int block = 0; block < 360; ++block) {
         std::fill(buses.begin(), buses.end(), 0.0f);
         float* left = buses.data();
@@ -587,21 +597,11 @@ int main() {
         sawOutputTransient = sawOutputTransient || outputGate == 5.0f;
         sawInputEnvelope = sawInputEnvelope || inputEnvelope > 0.0f;
         sawOutputEnvelope = sawOutputEnvelope || outputEnvelope > 0.0f;
-        gDrawnText.clear();
-        factory->draw(algorithm);
-        screenShowedEnvelopeActivity = screenShowedEnvelopeActivity ||
-            (!drawnTextContains("IN 00") && !drawnTextContains("OUT 00"));
-        screenShowedTransientActivity = screenShowedTransientActivity ||
-            drawnTextContains("!");
     }
     if (!sawInputTransient || !sawOutputTransient ||
         !sawInputEnvelope || !sawOutputEnvelope) {
         return fail("an assigned analysis signal did not reach its CV bus");
     }
-    if (!screenShowedEnvelopeActivity || !screenShowedTransientActivity) {
-        return fail("performance screen did not report envelope/transient activity");
-    }
-
     // The shared Transient Threshold must govern the post-mix detector just as
     // it governs both input detectors upstream. At the audited top-of-range
     // setting, allow any existing gate to expire and then prove fresh output
@@ -696,16 +696,20 @@ int main() {
     factory->draw(algorithm);
     if (gStreamOpenCalls != opensBeforeSampleSource + 2 ||
         gDeferredSampleRequest == nullptr ||
-        !drawnTextContains("CAPICOLA   SAMPLE LOAD")) {
+        !drawnTextContains("LOADING Stereo.wav")) {
         return fail("sample confirmation did not enter asynchronous loading");
     }
     completeSampleRequest(*gDeferredSampleRequest, true);
     gDeferredSampleRequest = nullptr;
     gDeferSampleRead = false;
+    const uint32_t folderCallsBeforeSampleTitle = gFolderInfoCalls;
+    const uint32_t fileCallsBeforeSampleTitle = gFileInfoCalls;
     gDrawnText.clear();
     factory->draw(algorithm);
-    if (!drawnTextContains("CAPICOLA   SAMPLE PLAY")) {
-        return fail("successful sample callback did not enable memory playback");
+    if (!drawnTextContains("Stereo.wav") ||
+        gFolderInfoCalls != folderCallsBeforeSampleTitle ||
+        gFileInfoCalls != fileCallsBeforeSampleTitle) {
+        return fail("successful sample callback did not title the playing sample");
     }
 
     // A second selection made while a read is still active supersedes the
@@ -733,8 +737,8 @@ int main() {
     gDeferSampleRead = false;
     gDrawnText.clear();
     factory->draw(algorithm);
-    if (!drawnTextContains("CAPICOLA   SAMPLE PLAY")) {
-        return fail("queued replacement callback did not enable playback");
+    if (!drawnTextContains("Stereo.wav")) {
+        return fail("queued replacement callback did not title the playing sample");
     }
 
     // A host read that starts but reports failure must never expose partially
@@ -743,7 +747,7 @@ int main() {
     factory->parameterChanged(algorithm, sample);
     gDrawnText.clear();
     factory->draw(algorithm);
-    if (!drawnTextContains("CAPICOLA   SAMPLE WAIT")) {
+    if (!drawnTextContains("SAMPLE WAIT")) {
         return fail("failed sample callback did not leave Sample mode waiting");
     }
     gSampleReadCallbackSucceeds = true;
@@ -909,7 +913,7 @@ int main() {
 
     // Sample mode has no transport trigger, so a loaded buffer loops without
     // any further host read. A deliberately tiny buffer proves multiple wraps
-    // inside one audio block and keeps the source state at SAMPLE PLAY.
+    // inside one audio block and keeps the sample name in the title.
     gSampleFrameCount = 5;
     values[folder] = 0;
     values[sample] = 0;
@@ -929,7 +933,7 @@ int main() {
     gDrawnText.clear();
     factory->draw(algorithm);
     if (gStreamOpenCalls != readsBeforeLoopStep ||
-        !drawnTextContains("CAPICOLA   SAMPLE PLAY")) {
+        !drawnTextContains("Mono.wav")) {
         return fail("sample loop stopped or read the SD card from the audio step");
     }
     gSampleFrameCount = 48000;

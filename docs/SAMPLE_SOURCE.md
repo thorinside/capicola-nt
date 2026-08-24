@@ -16,7 +16,7 @@ Changing source resets Capicola's source history. This prevents audio retained f
 1. Put a sample in a location enumerated by disting NT's sample-folder catalogue.
 2. Turn the left encoder on the persistent Capicola performance screen to select **Sample** (or set the `Source` parameter). The current valid selection begins loading immediately.
 3. Press the left encoder to temporarily replace the performance screen with **SELECT FOLDER**. Turn to choose a host-catalogued folder, then press to continue.
-4. On **SELECT SAMPLE**, turn to choose the displayed host-catalogued sample and press to load it. The persistent performance screen returns immediately, shows **SAMPLE LOAD** during the asynchronous read, then **SAMPLE PLAY** when the loaded buffer starts. **SAMPLE WAIT** means no sample is currently playing.
+4. On **SELECT SAMPLE**, turn to choose the displayed host-catalogued sample and press to load it. The persistent performance screen returns immediately, shows **LOADING** with the selected name during the asynchronous read, then uses the playing sample's name as its title. **SAMPLE WAIT** means no sample is currently available.
 
 The folder and sample names shown by the Source page and custom selector come from the host catalogue. `Folder` uses the host string-picker contract and `Sample` uses the host confirm-picker contract, so compatible controllers can present the folder and sample browsers. Changing `Folder` updates the legal `Sample` range and immediately loads the selected valid entry in that folder. If the old Sample number is outside the new folder's range, Capicola updates the visible host parameter to the nearest legal value before loading; recursive host callbacks are guarded. Confirming `Sample` reloads that exact valid catalogue entry into a fixed stereo float buffer and restarts playback.
 
@@ -38,10 +38,10 @@ Supported catalogue metadata and format boundaries are recorded in [`CAPABILITY_
 
 ## Performance controls
 
-The custom performance screen keeps the active **LIVE**/**SAMPLE LOAD**/**SAMPLE PLAY**/**SAMPLE WAIT** source state, three immediate controls, MAIN/ALT state, Mix, and Capicola input/output activity visible. **IN** and **OUT** show the normalized envelope level from 00–99; `!` beside either value reports its transient detector. It follows the approved v2 interaction hierarchy:
+The custom performance screen shows **CAPICOLA LIVE**, **LOADING** with the selected name, the playing sample's name, or **SAMPLE WAIT** in its title. It keeps three immediate controls and Mix visible without the redundant MAIN/ALT or input/output activity numbers. It follows the approved interaction hierarchy:
 
 - Main pots: **Stretch**, **Threshold**, **Feedback**.
-- Press any of the three pots to switch the complete bank to the clearly labelled alternate trio: **Pitch**, **Grain Size**, **Quality**. The active MAIN/ALT identity, each active control name, and each value remain visible.
+- Press any of the three pots to switch the complete bank to the clearly labelled alternate trio: **Pitch**, **Grain Size**, **Quality**. The three active control names and values identify the bank without a separate MAIN/ALT label.
 - Turn the right encoder for **Mix**; press it for the audited momentary **Slice** action.
 - Turn the left encoder to replace Live with Sample or Sample with Live. In Sample mode, press it to enter the temporary folder/sample selection described above.
 - The temporary selector uses only the left encoder. Pressing after a sample choice loads it and returns to the one persistent performance screen; pots and the right encoder do not change performance controls while selection is open.
@@ -54,7 +54,7 @@ No separate module buttons are claimed by the custom UI. All twelve continuous c
 - **Drive Character:** 0.00% quake, 50.00% clean, 100.00% sinc; default 100.00%.
 - **Feedback Tone:** 0.00–100.00% maps exponentially to normalized bandpass center 0.002–0.9 (about 48 Hz–21.6 kHz at 48 kHz); default 37.69% (about 0.02).
 
-These controls use the exact audited upstream sweep equations, are shared by the left and right Capicola channels (Feedback Tone controls both feedback filters), and affect Live and Sample through the same processing path. The existing controls retain their audited ranges and tapers: Pitch ±12 semitones, Stretch realtime-to-freeze `(1-x)^2.5`, Threshold ratio 0–8/top=mute, Grain Size 32–4096 keyframes, Quality ε 0.1–0.001, Feedback 0–1.5, and Mix dry-to-wet. Together with the right-encoder **Slice** action, the interface represents all 13 audited processing capabilities.
+These controls use the exact audited upstream sweep equations, are shared by the left and right Capicola channels (Feedback Tone controls both feedback filters), and affect Live and Sample through the same processing path. The existing controls retain their audited ranges and tapers: Pitch ±12 semitones, Stretch realtime-to-freeze `(1-x)^2.5`, Threshold ratio 0–8/top=mute, Grain Size 32–4096 keyframes, Quality ε 0.1–0.001, Feedback 0–1.5, and Mix dry-to-wet. The Stretch value is displayed as its time factor (about 5.7× at midpoint) and **FREEZE** at the clockwise stop. For an uninterrupted long stretch, use 100% Mix and 100% Threshold: lower Threshold values intentionally accept transients that catch the read head up to the current source. A larger Grain Size increases the distance between adaptive splices but does not extend the maximum beyond freeze. Together with the right-encoder **Slice** action, the interface represents all 13 audited processing capabilities.
 
 ## Processing and routing
 

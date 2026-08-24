@@ -83,15 +83,14 @@ bank and an ALT bank:
 | Right encoder | Mix | — |
 | Press right encoder | Trigger Slice | — |
 
-The bottom line says **MAIN** or **ALT** and shows the current Mix. **IN** and
-**OUT** are envelope levels from 00–99; `!` after either value means its
-transient detector fired.
+The three visible control names show which pot bank is active. The bottom line
+shows only the current Mix.
 
-The source label has four states:
+The title line shows the source state:
 
-- **LIVE** — the selected input buses are being processed.
-- **SAMPLE LOAD** — the NT is reading the selected sample into memory.
-- **SAMPLE PLAY** — the loaded sample is looping.
+- **CAPICOLA LIVE** — the selected input buses are being processed.
+- **LOADING _name_** — the NT is reading that sample into memory.
+- **_sample name_** — that loaded sample is looping.
 - **SAMPLE WAIT** — Sample mode is selected, but no sample is available.
 
 ## Load and play a sample
@@ -102,13 +101,12 @@ arbitrary paths itself.
 1. Put the sample in a folder that appears in the NT sample catalogue.
 2. Turn the left encoder until the source changes to **Sample**. Capicola
    immediately loads the currently selected valid folder/sample.
-3. To choose something else, press the left encoder. On **SELECT FOLDER**, turn
-   to choose a folder and
-   press to continue.
+3. To choose something else, press the left encoder. On **SELECT FOLDER**,
+   turn to choose a folder and press to continue.
 4. On **SELECT SAMPLE**, turn to choose a sample and press to load it.
-5. The performance screen returns. **SAMPLE LOAD** is shown while the file is
-   read, followed by **SAMPLE PLAY** when playback begins. **SAMPLE WAIT** means
-   that the selection could not be loaded.
+5. The performance screen returns. **LOADING** and the sample name are shown
+   while the file is read. The title becomes the sample name when playback
+   begins. **SAMPLE WAIT** means that the selection could not be loaded.
 
 Samples loop continuously, forward, from the beginning. Changing Folder loads
 the current valid Sample in that folder; if the old Sample number is outside the
@@ -139,7 +137,7 @@ continuous controls are on the NT **Performance** parameter page.
 | Control | Range/action | Default | What it does |
 | --- | ---: | ---: | --- |
 | Pitch | -12 to +12 semitones | 0 | Transposes the processed audio |
-| Stretch | 0–100% | 0% | Moves from real-time playback to freeze |
+| Stretch | 1.0× to Freeze | 1.0× | Slows the playback grid; the screen shows the time factor |
 | Threshold | 0–100% | 22% | Sets the automatic transient threshold; 100% disables automatic triggers |
 | Grain Size | 32–4096 | 128 | Sets the analysis grain length in keyframes |
 | Quality | 0–100% | 100% | Moves from coarse to fine analysis |
@@ -154,6 +152,20 @@ continuous controls are on the NT **Performance** parameter page.
 
 Feedback above 100% can grow rapidly and become loud. Reduce Feedback and your
 monitoring level before experimenting in that range.
+
+### Hear a longer stretch
+
+Stretch already reaches its maximum at **FREEZE**. Capicola also follows
+transients: each accepted transient catches the read head up toward the current
+audio, which preserves rhythm but can make a large Stretch setting sound much
+shorter.
+
+For an obvious sustained stretch, set Mix to 100%, raise Stretch, set Threshold
+to 100% to disable automatic transient catches, and try a larger Grain Size.
+At the upstream taper's midpoint the screen shows about **5.7×**; the clockwise
+stop shows **FREEZE**. Grain Size changes the distance between adaptive splices,
+not the maximum Stretch. Press the right encoder only when you intentionally
+want a manual Slice to catch up.
 
 ## CV modulation and analysis outputs
 
@@ -184,7 +196,7 @@ analysis signal and an audio output—to the same bus.
   to 100%, Stretch to 0%, Feedback to 0%, and use Replace on dedicated outputs.
 - **A mono patch is only on the left:** set Right input to `None` to normalize
   Left input to both channels.
-- **The display stays at SAMPLE LOAD:** wait for the file read to finish. If it
+- **The display stays at LOADING:** wait for the file read to finish. If it
   does not finish, reinsert the SD card and select the sample again.
 - **The display says SAMPLE WAIT:** make sure the SD card is mounted and the
   selected folder/sample still exists, then confirm Sample again.

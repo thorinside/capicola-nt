@@ -49,10 +49,13 @@ queries, parameter-definition updates, or file reads. A missing source block or
 non-finite DSP result ramps the last valid output to silence; catalogue refresh
 and sample recovery wait for a later parameter/UI event.
 
-The custom UI owns three pressable pots and two pressable encoders. Its MAIN/ALT
-performance hierarchy and temporary folder/sample selector are documented in
-the [user guide](../README.md). All twelve continuous processing controls remain
-ordinary host parameters on the Performance page.
+The custom UI owns three pressable pots and two pressable encoders. Its two
+labelled pot banks and temporary folder/sample selector are documented in the
+[user guide](../README.md). The title prioritizes the loaded sample name; the
+footer contains only Mix, with analysis activity left to the optional CV
+outputs. Stretch retains the upstream taper but is rendered as a time factor or
+**FREEZE**. All twelve continuous processing controls remain ordinary host
+parameters on the Performance page.
 
 ## Pinned source and platform
 
