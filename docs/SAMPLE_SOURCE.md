@@ -1,6 +1,6 @@
 # Live and loaded-sample sources
 
-This delivery uses the disting NT firmware/SDK **1.16.0** sample catalogue and stream APIs. It does not scan arbitrary files itself.
+This delivery uses the disting NT firmware/SDK **1.16.0** sample catalogue and asynchronous WAV reader. It does not scan arbitrary files itself.
 
 ## Selecting a source
 
@@ -16,27 +16,29 @@ Changing source resets Capicola's source history. This prevents audio retained f
 1. Put a sample in a location enumerated by disting NT's sample-folder catalogue.
 2. Turn the left encoder on the persistent Capicola performance screen to select **Sample** (or set the `Source` parameter).
 3. Press the left encoder to temporarily replace the performance screen with **SELECT FOLDER**. Turn to choose a host-catalogued folder, then press to continue.
-4. On **SELECT SAMPLE**, turn to choose the displayed host-catalogued sample and press to load it. The persistent performance screen returns immediately and shows **SAMPLE PLAY** after a successful open or **SAMPLE WAIT** when no stream is open.
+4. On **SELECT SAMPLE**, turn to choose the displayed host-catalogued sample and press to load it. The persistent performance screen returns immediately, shows **SAMPLE LOAD** during the asynchronous read, then **SAMPLE PLAY** when the loaded buffer starts. **SAMPLE WAIT** means no sample is currently playing.
 
-The folder and sample names shown by the Source page and custom selector come from the host catalogue. `Folder` uses the host string-picker contract and `Sample` uses the host confirm-picker contract, so compatible controllers can present the folder and sample browsers. Changing `Folder` updates the legal `Sample` range and closes the prior stream, but does not open a file; confirming `Sample` opens that exact valid catalogue entry as a one-shot stream from its beginning. Confirming it again reopens it. An invalid folder or sample value is not clamped to a different catalogue entry, displays no substituted name, and leaves Sample mode selected but silent. The wrapper requests normal sequential, forward playback and uses the file sample rate to ask the host streamer for rate conversion to the 48 kHz baseline.
+The folder and sample names shown by the Source page and custom selector come from the host catalogue. `Folder` uses the host string-picker contract and `Sample` uses the host confirm-picker contract, so compatible controllers can present the folder and sample browsers. Changing `Folder` updates the legal `Sample` range and invalidates the prior sample, but does not read a file; confirming `Sample` reads that exact valid catalogue entry into a fixed stereo float buffer and begins one-shot playback from its start. Confirming it again reloads it. An invalid folder or sample value is not clamped to a different catalogue entry, displays no substituted name, and leaves Sample mode selected but silent.
+
+The wrapper requests stereo 32-bit float frames, allowing the host reader to duplicate mono or convert supported PCM formats. It reads at most the first **1,536,000 frames**: 32 seconds at 48 kHz, 64 seconds at 24 kHz, or 16 seconds at 96 kHz. Playback uses linear interpolation and advances by the file-sample-rate/host-sample-rate ratio. It applies the NT sample-player level scaling before both channels enter Capicola.
 
 ## Presets, remounts, and unavailable samples
 
 `Source`, `Folder`, and `Sample` are ordinary NT parameters, so the host stores and restores them with the rest of a preset; Capicola adds no separate file database or custom preset format. On a fresh Sample-mode instance, the host's restored parameter callbacks reopen a valid saved selection. If restoration happens before its file is available, the screen remains at **SAMPLE WAIT**; confirm `Sample` after the catalogue is ready.
 
-For real-time safety, the audio callback never scans the catalogue, changes parameter definitions, or opens a stream. A stream that returns no audio is closed and the current output is ramped to silence. In particular, inserting or remounting the SD card does not automatically reopen a sample from the audio callback. After a remount, confirm `Sample` or use the temporary folder/sample selector to refresh the catalogue and reopen the exact selection. This intentionally keeps SD and user-interface work away from the audio deadline.
+For real-time safety, the audio callback never scans the catalogue, changes parameter definitions, or reads the SD card. It only reads the fixed memory buffer and runs Capicola. Removing the card after a successful load does not interrupt the current playback. Inserting or remounting the card does not automatically reload a sample from the audio callback; confirm `Sample` or use the temporary folder/sample selector to refresh the catalogue and load the exact selection again.
 
-The API exposes catalogue indices and metadata through `NT_getNumSampleFolders()`, `NT_getSampleFolderInfo()`, and `NT_getSampleFileInfo()`, and makes `NT_streamOpen()` success authoritative. Capicola invokes those operations only during construction or a relevant parameter/user-interface event, not while producing an audio block.
+The API exposes catalogue indices and metadata through `NT_getNumSampleFolders()`, `NT_getSampleFolderInfo()`, and `NT_getSampleFileInfo()`. Capicola invokes those operations and starts `NT_readSampleFrames()` only during construction or a relevant parameter/user-interface event, not while producing an audio block. A persistent request object owns the asynchronous operation. Its callback makes the buffer playable only after a successful read; a newer source or selection generation rejects an obsolete completion.
 
-If the saved folder/sample catalogue entry is missing or moved so the saved indices are no longer valid, the wrapper performs no out-of-range lookup and opens nothing. If metadata is unsupported (including a zero sample rate), it does not call the streamer. If `NT_streamOpen()` rejects an unreadable resource, the failed open is retained. In every case, `Source` remains **Sample**, Capicola's prior source history is cleared, and the outputs are silent; the wrapper neither selects another catalogue entry nor falls back to **Live**. The host owns catalogue construction and error presentation, so the wrapper does not add a recovery dialog or file substitution policy.
+If the saved folder/sample catalogue entry is missing or moved so the saved indices are no longer valid, the wrapper performs no out-of-range lookup and reads nothing. If metadata is unsupported (including a zero sample rate), it does not start a read. If the host rejects or fails an unreadable resource, the buffer does not become playable. In every case, `Source` remains **Sample**, Capicola's prior source history is cleared, and the outputs are silent; the wrapper neither selects another catalogue entry nor falls back to **Live**. The host owns catalogue construction and error presentation, so the wrapper does not add a recovery dialog or file substitution policy.
 
-Mono files are delivered by the host stream as stereo and therefore feed identical left and right Capicola channels. Stereo files retain left/right order. The wrapper adds no duration limit, loop, reverse, scrub, region, chopping, polyphony, recording, or live/sample mix feature.
+Mono files are delivered by the host reader as stereo and therefore feed identical left and right Capicola channels. Stereo files retain left/right order. The wrapper adds no loop, reverse, scrub, region, chopping, polyphony, recording, or live/sample mix feature.
 
 Supported catalogue metadata and format boundaries are recorded in [`CAPABILITY_AUDIT.md`](CAPABILITY_AUDIT.md). Unsupported, unreadable, missing, or unmounted resources retain host behavior.
 
 ## Performance controls
 
-The custom performance screen keeps the active **LIVE**/**SAMPLE PLAY**/**SAMPLE WAIT** source state, three immediate controls, MAIN/ALT state, Mix, and Capicola input/output activity visible. **IN** and **OUT** show the normalized envelope level from 00–99; `!` beside either value reports its transient detector. It follows the approved v2 interaction hierarchy:
+The custom performance screen keeps the active **LIVE**/**SAMPLE LOAD**/**SAMPLE PLAY**/**SAMPLE WAIT** source state, three immediate controls, MAIN/ALT state, Mix, and Capicola input/output activity visible. **IN** and **OUT** show the normalized envelope level from 00–99; `!` beside either value reports its transient detector. It follows the approved v2 interaction hierarchy:
 
 - Main pots: **Stretch**, **Threshold**, **Feedback**.
 - Press any of the three pots to switch the complete bank to the clearly labelled alternate trio: **Pitch**, **Grain Size**, **Quality**. The active MAIN/ALT identity, each active control name, and each value remain visible.

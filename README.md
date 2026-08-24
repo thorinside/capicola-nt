@@ -90,8 +90,9 @@ transient detector fired.
 The source label has three states:
 
 - **LIVE** — the selected input buses are being processed.
-- **SAMPLE PLAY** — a sample stream is open.
-- **SAMPLE WAIT** — Sample mode is selected, but no sample stream is open.
+- **SAMPLE LOAD** — the NT is reading the selected sample into memory.
+- **SAMPLE PLAY** — the loaded sample is playing.
+- **SAMPLE WAIT** — Sample mode is selected, but no sample is playing.
 
 ## Load and play a sample
 
@@ -103,20 +104,23 @@ arbitrary paths itself.
 3. Press the left encoder. On **SELECT FOLDER**, turn to choose a folder and
    press to continue.
 4. On **SELECT SAMPLE**, turn to choose a sample and press to load it.
-5. The performance screen returns. **SAMPLE PLAY** confirms that the stream
-   opened; **SAMPLE WAIT** means it did not.
+5. The performance screen returns. **SAMPLE LOAD** is shown while the file is
+   read, followed by **SAMPLE PLAY** when playback begins. **SAMPLE WAIT** means
+   that nothing is currently playing.
 
 Samples play once, forward, from the beginning. To restart the selected sample,
 confirm the **Sample** parameter again or repeat the selection. Mono samples
-feed both channels; stereo samples keep their left/right order.
+feed both channels; stereo samples keep their left/right order. Capicola loads
+at most 1,536,000 frames from the start of a file (32 seconds at 48 kHz).
 
 The Source, Folder, and Sample selections are ordinary NT preset parameters.
 Keep the SD sample catalogue stable when a preset depends on a sample. If the
 saved catalogue indices are invalid or the selected file is unreadable,
 Capicola remains in Sample mode and outputs silence—it does not switch to Live.
-After removing or remounting the SD card, confirm **Sample** again to reopen it;
-Capicola does not perform catalogue discovery or stream setup in the audio
-callback.
+Removing the SD card after loading does not interrupt the current in-memory
+playback. After inserting or remounting the card, confirm **Sample** again
+before another load. Capicola does not perform catalogue discovery or file
+reads in the audio callback.
 
 Capicola does not add looping, reverse playback, scrubbing, regions, chopping,
 polyphony, recording, or live/sample mixing.
@@ -174,8 +178,11 @@ analysis signal and an audio output—to the same bus.
   to 100%, Stretch to 0%, Feedback to 0%, and use Replace on dedicated outputs.
 - **A mono patch is only on the left:** set Right input to `None` to normalize
   Left input to both channels.
-- **The display says SAMPLE WAIT:** make sure the SD card is mounted and the
-  selected folder/sample still exists, then confirm Sample or select it again.
+- **The display stays at SAMPLE LOAD:** wait for the file read to finish. If it
+  does not finish, reinsert the SD card and select the sample again.
+- **The display says SAMPLE WAIT:** this is also the normal state after the
+  one-shot reaches its end. If it never played, make sure the SD card is mounted
+  and the selected folder/sample still exists, then confirm Sample again.
 - **A sample stops:** sample playback is intentionally one-shot; confirm the
   Sample parameter again to restart it.
 - **The level keeps increasing:** set Feedback below 100%, preferably to 0%

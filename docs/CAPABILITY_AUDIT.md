@@ -9,7 +9,7 @@ This is the controlling capability boundary for the first disting NT release. Th
 | Capicola | `f0fb61cfa7111067b4ec1a642d1b16a0910adb3b` (`main`, no upstream release tag) | Audited DSP, panel labels/ranges, and analysis signals |
 | distingNT_API | tag `v1.16.0`, commit `cd12d876dbe060859828053efab1cbc98c9df251` | Delivery SDK baseline |
 | disting NT firmware | exactly `1.16.0` | Delivery/runtime baseline; no other firmware is implied supported |
-| Plug-in API | `kNT_apiVersion13` | Custom UI, serialization, WAV streaming, 64-bus constants, and dynamic parameter-page support |
+| Plug-in API | `kNT_apiVersion13` | Custom UI, serialization, asynchronous WAV reading, 64-bus constants, and dynamic parameter-page support |
 | Audio rate | 48 kHz | Capicola constants and all Hz/ms conversions in this audit |
 
 Both repositories are Git submodules under `vendor/`; the gitlinks, not branch names, are authoritative. The SDK's `v1.15.0` and `v1.16.0` tags currently point to the same commit, so the exact commit is recorded to remove tag ambiguity. Firmware 1.16.0 still requires later ARM, emulator, and physical-runtime verification before release; this audit does not claim those later acceptance checks.
@@ -42,13 +42,13 @@ This count fits the pinned platform's eight physical output buses, but allocatio
 
 ## Sample-source boundary
 
-Loaded-sample mode is an approved NT wrapper source adapter, not evidence that upstream Capicola is a sampler. The pinned API exposes host-catalogued files with `uint32` frame count/sample rate, mono or stereo channels, and 8-, 16-, 24-bit PCM or 32-bit float metadata; its reader can convert channel count/bit depth and its stream API supports rate conversion by render speed.
+Loaded-sample mode is an approved NT wrapper source adapter, not evidence that upstream Capicola is a sampler. The pinned API exposes host-catalogued files with `uint32` frame count/sample rate, mono or stereo channels, and 8-, 16-, 24-bit PCM or 32-bit float metadata. Its asynchronous reader can convert channel count and bit depth. The wrapper performs sample-rate conversion while reading the loaded buffer.
 
 Accordingly, the wrapper boundary is:
 
 - accept only files that the NT host enumerates through its sample-folder API;
 - duplicate mono into Capicola's two processing channels and preserve stereo order;
-- impose no additional duration ceiling beyond the host's `uint32` metadata and successful streaming;
+- load at most the first 1,536,000 frames (32 seconds at the audited 48 kHz baseline) into fixed construction-time memory;
 - leave unsupported/unreadable resources to host error behavior; and
 - add no recording, looping, reverse, scrubbing, start/end editing, chopping, polyphony, source mixing, or sample substitution.
 

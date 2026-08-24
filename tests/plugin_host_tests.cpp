@@ -18,8 +18,11 @@ float gWorkBuffer[kFrames * 2] = {};
 bool gCardMounted = true;
 uint32_t gNumFolders = 2;
 uint32_t gDrumsSampleCount = 2;
+uint32_t gSampleFrameCount = 48000;
 bool gSampleMetadataSupported = true;
 bool gStreamOpenSucceeds = true;
+bool gSampleReadCallbackSucceeds = true;
+bool gDeferSampleRead = false;
 uint32_t gStreamRenderCalls = 0;
 uint32_t gStreamOpenCalls = 0;
 uint32_t gFolderInfoCalls = 0;
@@ -31,6 +34,8 @@ uint32_t gStreamClock = 0;
 uint32_t gOpenedFolder = 0;
 uint32_t gOpenedSample = 0;
 float gOpenedSpeed = 0.0f;
+uint32_t gLastRequestedFrames = 0;
+const _NT_wavRequest* gDeferredSampleRequest = nullptr;
 _NT_algorithm* gAlgorithm = nullptr;
 const _NT_factory* gFactory = nullptr;
 std::vector<std::string> gDrawnText;
@@ -67,6 +72,24 @@ bool drawnTextContains(const char* fragment) {
         if (text.find(fragment) != std::string::npos) return true;
     }
     return false;
+}
+
+void completeSampleRequest(const _NT_wavRequest& request, bool success) {
+    if (success) {
+        const uint32_t sourceRate = request.folder == 1 ? 24000U : 48000U;
+        _NT_frame* frames = static_cast<_NT_frame*>(request.dst);
+        for (uint32_t i = 0; i < request.numFrames; ++i) {
+            frames[i][0] = std::sin(
+                2.0f * kPi * 330.0f * static_cast<float>(i) /
+                static_cast<float>(sourceRate));
+            frames[i][1] = request.sample == 0
+                ? frames[i][0]
+                : 0.35f * std::sin(
+                    2.0f * kPi * 710.0f * static_cast<float>(i) /
+                    static_cast<float>(sourceRate));
+        }
+    }
+    request.callback(request.callbackData, success);
 }
 
 } // namespace
@@ -111,11 +134,34 @@ extern "C" void NT_getSampleFileInfo(uint32_t folder,
     }
     static const char* names[] = {"Mono.wav", "Stereo.wav", "Cloud.wav"};
     info.name = folder == 0 ? names[sample] : names[2];
-    info.numFrames = 48000;
+    info.numFrames = gSampleFrameCount;
     info.sampleRate = gSampleMetadataSupported
         ? (folder == 1 ? 24000U : 48000U) : 0U;
     info.channels = sample == 0 ? kNT_WavMono : kNT_WavStereo;
     info.bits = kNT_WavBits16;
+}
+
+extern "C" bool NT_readSampleFrames(const _NT_wavRequest& request) {
+    ++gStreamOpenCalls;
+    gOpenedFolder = request.folder;
+    gOpenedSample = request.sample;
+    gLastRequestedFrames = request.numFrames;
+    gStreamClock = 0;
+    if (!gStreamOpenSucceeds) {
+        return false;
+    }
+    if (request.channels != kNT_WavStereo ||
+        request.bits != kNT_WavBits32 || request.dst == nullptr) {
+        gInvalidCatalogLookup = true;
+        return false;
+    }
+
+    if (gDeferSampleRead) {
+        gDeferredSampleRequest = &request;
+    } else {
+        completeSampleRequest(request, gSampleReadCallbackSucceeds);
+    }
+    return true;
 }
 
 extern "C" bool NT_streamOpen(_NT_stream, const _NT_streamOpenData& data) {
@@ -305,7 +351,7 @@ int main() {
     // The host persists ordinary parameter values in its preset. Recreate a
     // fresh instance with those values already restored, including Sample
     // mode. Host parameter callbacks restore the valid resource before the
-    // first audio step; step itself must do no catalogue or stream-open work.
+    // first audio step; step itself must do no catalogue or sample-read work.
     std::vector<uint8_t> restoredSram(requirements.sram + 1U);
     std::vector<uint8_t> restoredDram(requirements.dram + 1U);
     std::vector<uint8_t> restoredDtc(requirements.dtc + 1U);
@@ -333,9 +379,14 @@ int main() {
         gParameterDefinitionUpdates;
     std::vector<float> restoredBuses(kNT_lastBus * kFrames, 0.0f);
     factory->step(restored, restoredBuses.data(), kFrames / 4);
+    double restoredEnergy = 0.0;
+    for (int i = 0; i < kFrames; ++i) {
+        restoredEnergy += std::fabs(restoredBuses[12 * kFrames + i]) +
+                          std::fabs(restoredBuses[13 * kFrames + i]);
+    }
     if (gStreamOpenCalls != opensBeforePresetRestore + 1 ||
         gOpenedFolder != 0 || gOpenedSample != 1 ||
-        gStreamRenderCalls == 0 || restoredValues[source] != 1 ||
+        restoredEnergy == 0.0 || restoredValues[source] != 1 ||
         gFolderInfoCalls != folderCallsBeforeRestoredStep ||
         gFileInfoCalls != fileCallsBeforeRestoredStep ||
         gParameterDefinitionUpdates != definitionUpdatesBeforeRestoredStep) {
@@ -453,7 +504,7 @@ int main() {
     // Simulate SD/catalogue activity caused by opening an external Source panel
     // while audio is running. Even rapid host-mapped Source changes must keep
     // step() independent of card state, catalogue queries, definition updates,
-    // and stream opens, and every produced frame must remain finite.
+    // and sample reads, and every produced frame must remain finite.
     const uint32_t mountChecksBeforeSourceActivity = gCardMountChecks;
     const uint32_t folderCallsBeforeSourceActivity = gFolderInfoCalls;
     const uint32_t fileCallsBeforeSourceActivity = gFileInfoCalls;
@@ -484,7 +535,7 @@ int main() {
         gParameterDefinitionUpdates != updatesBeforeSourceActivity ||
         gStreamOpenCalls != opensBeforeSourceActivity ||
         gStreamRenderCalls != rendersBeforeSourceActivity) {
-        return fail("audio step performed SD catalogue or stream setup work");
+        return fail("audio step performed SD catalogue or sample-read work");
     }
     std::fill(buses.begin(), buses.end(), 0.0f);
 
@@ -637,17 +688,79 @@ int main() {
     }
     ui = {};
     ui.controls = kNT_encoderButtonL;
+    gDeferSampleRead = true;
     factory->customUi(algorithm, ui);
     gDrawnText.clear();
     factory->draw(algorithm);
     if (gStreamOpenCalls != opensBeforeSampleSource + 1 ||
-        !drawnTextContains("CAPICOLA   SAMPLE PLAY")) {
-        return fail("sample confirmation did not return to the performance screen");
+        gDeferredSampleRequest == nullptr ||
+        !drawnTextContains("CAPICOLA   SAMPLE LOAD")) {
+        return fail("sample confirmation did not enter asynchronous loading");
     }
+    completeSampleRequest(*gDeferredSampleRequest, true);
+    gDeferredSampleRequest = nullptr;
+    gDeferSampleRead = false;
+    gDrawnText.clear();
+    factory->draw(algorithm);
+    if (!drawnTextContains("CAPICOLA   SAMPLE PLAY")) {
+        return fail("successful sample callback did not enable memory playback");
+    }
+
+    // A second selection made while a read is still active supersedes the
+    // first one. The persistent request is reused only after the first
+    // callback, so the host never owns two writes into the same buffer.
+    values[sample] = 0;
+    gDeferSampleRead = true;
+    const uint32_t readsBeforeReplacement = gStreamOpenCalls;
+    factory->parameterChanged(algorithm, sample);
+    const _NT_wavRequest* firstRequest = gDeferredSampleRequest;
+    values[sample] = 1;
+    factory->parameterChanged(algorithm, sample);
+    if (gStreamOpenCalls != readsBeforeReplacement + 1 ||
+        firstRequest == nullptr) {
+        return fail("replacement sample started a concurrent buffer read");
+    }
+    completeSampleRequest(*firstRequest, true);
+    if (gStreamOpenCalls != readsBeforeReplacement + 2 ||
+        gDeferredSampleRequest == nullptr ||
+        gDeferredSampleRequest->sample != 1) {
+        return fail("queued replacement sample did not start after callback");
+    }
+    completeSampleRequest(*gDeferredSampleRequest, true);
+    gDeferredSampleRequest = nullptr;
+    gDeferSampleRead = false;
+    gDrawnText.clear();
+    factory->draw(algorithm);
+    if (!drawnTextContains("CAPICOLA   SAMPLE PLAY")) {
+        return fail("queued replacement callback did not enable playback");
+    }
+
+    // A host read that starts but reports failure must never expose partially
+    // written buffer contents. A later explicit confirmation can recover.
+    gSampleReadCallbackSucceeds = false;
+    factory->parameterChanged(algorithm, sample);
+    gDrawnText.clear();
+    factory->draw(algorithm);
+    if (!drawnTextContains("CAPICOLA   SAMPLE WAIT")) {
+        return fail("failed sample callback did not leave Sample mode waiting");
+    }
+    gSampleReadCallbackSucceeds = true;
+    factory->parameterChanged(algorithm, sample);
+
+    // Drifters' fixed-memory contract is retained: longer files are truncated
+    // to 32 seconds at the 48 kHz design baseline rather than allocating at
+    // selection time or reading beyond the construction-time DRAM buffer.
+    gSampleFrameCount = 48000U * 40U;
+    factory->parameterChanged(algorithm, sample);
+    if (gLastRequestedFrames != 48000U * 32U) {
+        return fail("sample read exceeded the fixed 32-second DRAM buffer");
+    }
+    gSampleFrameCount = 48000U;
+    factory->parameterChanged(algorithm, sample);
 
     // All five audited secondary controls must alter their intended linked
     // Capicola/feedback path while the selected sample is the sole source.
-    // Reopening the sample resets both the host stream and engine, making each
+    // Reloading the sample resets both the memory playback and engine, making each
     // signature deterministic and independent of the previous control trial.
     auto sampleSignature = [&](int parameter, int value, int feedbackValue,
                                int characterValue) {
@@ -705,9 +818,9 @@ int main() {
     const float* dryLeft = buses.data() + 12 * kFrames;
     const float* dryRight = buses.data() + 13 * kFrames;
     for (int i = 0; i < kFrames; ++i) {
-        const float expectedLeft = std::sin(
+        const float expectedLeft = 8.0f * std::sin(
             2.0f * kPi * 330.0f * static_cast<float>(dryClock + i) / 48000.0f);
-        const float expectedRight = 0.35f * std::sin(
+        const float expectedRight = 8.0f * 0.35f * std::sin(
             2.0f * kPi * 710.0f * static_cast<float>(dryClock + i) / 48000.0f);
         if (std::fabs(dryLeft[i] - expectedLeft) > 1.0e-6f ||
             std::fabs(dryRight[i] - expectedRight) > 1.0e-6f) {
@@ -735,10 +848,10 @@ int main() {
                 }
                 sampleEnergy += outLeft[i] * outLeft[i] + outRight[i] * outRight[i];
                 stereoDifference += std::fabs(outLeft[i] - outRight[i]);
-                const float dryExpectedLeft = std::sin(
+                const float dryExpectedLeft = 8.0f * std::sin(
                     2.0f * kPi * 330.0f * static_cast<float>(blockClock + i) /
                     48000.0f);
-                const float dryExpectedRight = 0.35f * std::sin(
+                const float dryExpectedRight = 8.0f * 0.35f * std::sin(
                     2.0f * kPi * 710.0f * static_cast<float>(blockClock + i) /
                     48000.0f);
                 mappedWetDifference += std::fabs(outLeft[i] - dryExpectedLeft) +
@@ -746,9 +859,9 @@ int main() {
             }
         }
     }
-    if (gStreamOpenCalls == 0 || gStreamRenderCalls == 0 ||
-        gOpenedFolder != 0 || gOpenedSample != 1 || gOpenedSpeed != 1.0f) {
-        return fail("selected sample was not opened and rendered at host-rate speed");
+    if (gStreamOpenCalls == 0 || gStreamRenderCalls != 0 ||
+        gOpenedFolder != 0 || gOpenedSample != 1) {
+        return fail("selected sample was not loaded for memory playback");
     }
     if (sampleEnergy < 1.0 || stereoDifference < 1.0) {
         return fail("stereo sample was not processed through both Capicola channels");
@@ -757,8 +870,8 @@ int main() {
         return fail("host-mapped Mix value did not modulate Capicola processing");
     }
 
-    // A folder change updates the Sample range and invalidates the old stream,
-    // but only explicit Sample confirmation may open the new resource.
+    // A folder change updates the Sample range and invalidates old playback,
+    // but only explicit Sample confirmation may read the new resource.
     const uint32_t opensBeforeFolderChange = gStreamOpenCalls;
     const uint32_t rendersBeforeFolderChange = gStreamRenderCalls;
     values[folder] = 1;
@@ -774,24 +887,31 @@ int main() {
         gOpenedFolder != 1 || gOpenedSample != 0) {
         return fail("Sample confirmation did not open the selected folder resource");
     }
-    for (int block = 0; block < 300; ++block) {
-        factory->step(algorithm, buses.data(), kFrames / 4);
-    }
-    if (gOpenedSpeed != 0.5f) {
-        return fail("sample-rate conversion speed did not follow file metadata");
-    }
+    values[mix] = 0;
+    factory->step(algorithm, buses.data(), kFrames / 4);
     const float* monoLeft = buses.data() + 12 * kFrames;
     const float* monoRight = buses.data() + 13 * kFrames;
     for (int i = 0; i < kFrames; ++i) {
-        if (monoLeft[i] != monoRight[i]) {
-            return fail("host-delivered mono sample was not duplicated to both channels");
+        const float position = static_cast<float>(i) * 0.5f;
+        const uint32_t index = static_cast<uint32_t>(position);
+        const float fraction = position - static_cast<float>(index);
+        const float source0 = std::sin(
+            2.0f * kPi * 330.0f * static_cast<float>(index) / 24000.0f);
+        const float source1 = std::sin(
+            2.0f * kPi * 330.0f * static_cast<float>(index + 1U) / 24000.0f);
+        const float expected = 8.0f *
+            (source0 + fraction * (source1 - source0));
+        if (std::fabs(monoLeft[i] - expected) > 1.0e-5f ||
+            monoLeft[i] != monoRight[i]) {
+            return fail("loaded mono sample did not use metadata-rate stereo playback");
         }
     }
+    values[mix] = 100;
+    factory->parameterChanged(algorithm, sample);
 
-    // Card loss or a zero-frame stream result is handled inside step() only by
-    // dropping/fading the block and closing the stream. Remounting must not run
-    // catalogue discovery or reopen work on the audio thread. Explicit Sample
-    // confirmation performs recovery outside that thread.
+    // Once the asynchronous read completes, playback is entirely memory-backed.
+    // Card state changes therefore cannot trigger catalogue work or reads in
+    // step(), and they do not interrupt the already-loaded sample.
     const uint32_t opensBeforeRemount = gStreamOpenCalls;
     const uint32_t rendersBeforeRemount = gStreamRenderCalls;
     const uint32_t mountChecksBeforeRemount = gCardMountChecks;
@@ -803,23 +923,25 @@ int main() {
     gCardMounted = true;
     factory->step(algorithm, buses.data(), kFrames / 4);
     if (gStreamOpenCalls != opensBeforeRemount ||
-        gStreamRenderCalls != rendersBeforeRemount + 1 ||
+        gStreamRenderCalls != rendersBeforeRemount ||
         gCardMountChecks != mountChecksBeforeRemount ||
         gFolderInfoCalls != folderCallsBeforeRemount ||
         gFileInfoCalls != fileCallsBeforeRemount ||
         gParameterDefinitionUpdates != updatesBeforeRemount) {
-        return fail("audio step performed card recovery or catalogue work");
+        return fail("memory playback performed card recovery or catalogue work");
     }
+    double remountEnergy = 0.0;
     for (int i = 0; i < kFrames; ++i) {
-        if (buses[12 * kFrames + i] != 0.0f ||
-            buses[13 * kFrames + i] != 0.0f) {
-            return fail("zero-frame stream failure did not fade to silence");
-        }
+        remountEnergy += std::fabs(buses[12 * kFrames + i]) +
+                         std::fabs(buses[13 * kFrames + i]);
+    }
+    if (remountEnergy == 0.0) {
+        return fail("loaded sample stopped when SD state changed during playback");
     }
     factory->parameterChanged(algorithm, sample);
     factory->step(algorithm, buses.data(), kFrames / 4);
     if (gStreamOpenCalls != opensBeforeRemount + 1 ||
-        gStreamRenderCalls != rendersBeforeRemount + 2 ||
+        gStreamRenderCalls != rendersBeforeRemount ||
         gOpenedFolder != 1 || gOpenedSample != 0) {
         return fail("explicit Sample confirmation did not recover after remount");
     }
@@ -835,6 +957,7 @@ int main() {
     gCardMounted = true;
     factory->step(algorithm, buses.data(), kFrames / 4);
     factory->parameterChanged(algorithm, sample);
+    factory->step(algorithm, buses.data(), kFrames / 4);
     if (values[source] != 1 || gStreamOpenCalls != opensBeforeMissing ||
         gFileInfoCalls != filesBeforeMissing || gInvalidCatalogLookup) {
         return fail("missing sample reference substituted or fell back to live input");
@@ -846,7 +969,7 @@ int main() {
         }
     }
 
-    // Unsupported metadata is rejected before stream open.
+    // Unsupported metadata is rejected before starting a sample read.
     gNumFolders = 2;
     values[folder] = 0;
     values[sample] = 1;
@@ -857,7 +980,7 @@ int main() {
         return fail("unsupported sample substituted or fell back to live input");
     }
 
-    // An unreadable resource reaches the host streamer, whose failed open is
+    // An unreadable resource reaches the host reader, whose refusal is
     // authoritative. The wrapper retains Sample mode and renders silence.
     gSampleMetadataSupported = true;
     gStreamOpenSucceeds = false;
@@ -878,7 +1001,7 @@ int main() {
     gStreamOpenSucceeds = true;
 
     // Invalid catalogue values keep Sample mode silent and never substitute a
-    // different folder or file in lookups, display strings, or stream opens.
+    // different folder or file in lookups, display strings, or sample reads.
     const uint32_t opensBeforeInvalid = gStreamOpenCalls;
     const uint32_t rendersBeforeInvalid = gStreamRenderCalls;
     const uint32_t folderInfoBeforeInvalid = gFolderInfoCalls;
@@ -937,7 +1060,8 @@ int main() {
         }
     }
 
-    // Switching back to live resets Capicola and must stop all stream renders.
+    // Switching back to live resets Capicola and cannot invoke the legacy
+    // stream renderer.
     const uint32_t rendersBeforeLive = gStreamRenderCalls;
     values[source] = 0;
     factory->parameterChanged(algorithm, source);
@@ -953,7 +1077,7 @@ int main() {
         factory->step(algorithm, buses.data(), kFrames / 4);
     }
     if (gStreamRenderCalls != rendersBeforeLive) {
-        return fail("live mode continued rendering the sample stream");
+        return fail("live mode invoked the legacy sample stream renderer");
     }
     double liveDifference = 0.0;
     const float* outLeft = buses.data() + 12 * kFrames;

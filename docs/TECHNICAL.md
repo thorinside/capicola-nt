@@ -26,23 +26,25 @@ Changing source resets the engine so history from the replaced source cannot
 sound afterward.
 
 Live mode reads the selected logical buses, with optional left-to-right mono
-normalization. Sample mode uses the API v13 folder catalogue and stream API;
-it opens the exact selected catalogue entry as a forward, sequential, one-shot
-stream. Both channels render to private scratch buffers before Add/Replace
-audio output writes. Four optional analysis signals replace their selected CV
-buses and default to `None`.
+normalization. Sample mode uses the API v13 folder catalogue and asynchronous
+WAV reader. It loads up to 1,536,000 frames from the exact selected catalogue
+entry into a fixed stereo float buffer, then plays that buffer once, forward.
+The source-rate/host-rate ratio advances a linearly interpolated playback
+cursor. Both channels render to private scratch buffers before Add/Replace audio
+output writes. Four optional analysis signals replace their selected CV buses
+and default to `None`.
 
-All persistent DSP, stream, and block buffers come from the memory supplied at
-construction; the audio path performs no heap allocation. Typed objects and
-scratch buffers are explicitly aligned within those byte allocations. Engine
-reset is constant-time with respect to the large sparse rings: it resets their
-live range and sentinel rather than clearing roughly half a megabyte of DRAM.
-The three persistent shaper tables are initialized directly in that storage;
-the ARM build rejects any function whose static stack requirement exceeds 1 KiB.
-The audio callback also performs no SD catalogue queries, parameter-definition
-updates, or stream opens. A missing source block or non-finite DSP result ramps
-the last valid output to silence; catalogue refresh and sample recovery wait for
-a later parameter/UI event.
+All persistent DSP, sample, request, and block storage comes from the memory
+supplied at construction; the audio path performs no heap allocation. Typed
+objects and scratch buffers are explicitly aligned within those byte
+allocations. Engine reset is constant-time with respect to the large sparse
+rings: it resets their live range and sentinel rather than clearing roughly half
+a megabyte of DRAM. The three persistent shaper tables are initialized directly
+in that storage; the ARM build rejects any function whose static stack
+requirement exceeds 1 KiB. The audio callback also performs no SD catalogue
+queries, parameter-definition updates, or file reads. A missing source block or
+non-finite DSP result ramps the last valid output to silence; catalogue refresh
+and sample recovery wait for a later parameter/UI event.
 
 The custom UI owns three pressable pots and two pressable encoders. Its MAIN/ALT
 performance hierarchy and temporary folder/sample selector are documented in
@@ -107,7 +109,7 @@ unnecessarily technical:
 - [Capability audit](CAPABILITY_AUDIT.md) — audited controls, ranges, sample
   boundary, and pinned baseline
 - [Live routing](LIVE_ROUTING.md) — bus and Add/Replace behavior
-- [Sample source](SAMPLE_SOURCE.md) — catalogue, stream, preset, and remount
+- [Sample source](SAMPLE_SOURCE.md) — catalogue, buffered loading, preset, and remount
   lifecycle
 - [Host modulation](HOST_MODULATION.md) — parameter-to-CV contract
 - [Analysis CV](ANALYSIS_CV.md) — optional output voltages and bus behavior
