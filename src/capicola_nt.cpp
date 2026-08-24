@@ -1,5 +1,7 @@
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <new>
 
@@ -25,6 +27,13 @@ enum Parameter {
     kParamSource,
     kParamFolder,
     kParamSample,
+    kParamPitch,
+    kParamStretch,
+    kParamThreshold,
+    kParamGrainSize,
+    kParamQuality,
+    kParamFeedback,
+    kParamMix,
     kNumParameters,
 };
 
@@ -46,6 +55,30 @@ static const _NT_parameter kParameterTemplate[] = {
      .unit = kNT_unitHasStrings, .scaling = 0, .enumStrings = nullptr},
     {.name = "Sample", .min = 0, .max = 0, .def = 0,
      .unit = kNT_unitConfirm, .scaling = 0, .enumStrings = nullptr},
+    {.name = "Pitch", .min = -120, .max = 120, .def = 0,
+     .unit = kNT_unitSemitones, .scaling = kNT_scaling10, .enumStrings = nullptr},
+    {.name = "Stretch", .min = 0, .max = 100, .def = 0,
+     .unit = kNT_unitPercent, .scaling = 0, .enumStrings = nullptr},
+    {.name = "Threshold", .min = 0, .max = 100, .def = 22,
+     .unit = kNT_unitPercent, .scaling = 0, .enumStrings = nullptr},
+    {.name = "Grain Size", .min = 32, .max = 4096, .def = 128,
+     .unit = kNT_unitNone, .scaling = 0, .enumStrings = nullptr},
+    {.name = "Quality", .min = 0, .max = 100, .def = 100,
+     .unit = kNT_unitPercent, .scaling = 0, .enumStrings = nullptr},
+    {.name = "Feedback", .min = 0, .max = 150, .def = 0,
+     .unit = kNT_unitPercent, .scaling = 0, .enumStrings = nullptr},
+    {.name = "Mix", .min = 0, .max = 100, .def = 100,
+     .unit = kNT_unitPercent, .scaling = 0, .enumStrings = nullptr},
+};
+
+static const uint8_t kPerformanceParameters[] = {
+    kParamPitch,
+    kParamStretch,
+    kParamThreshold,
+    kParamGrainSize,
+    kParamQuality,
+    kParamFeedback,
+    kParamMix,
 };
 
 static const uint8_t kSourceParameters[] = {
@@ -64,6 +97,7 @@ static const uint8_t kRoutingParameters[] = {
 };
 
 static const _NT_parameterPage kPages[] = {
+    {"Performance", ARRAY_SIZE(kPerformanceParameters), 0, {0, 0}, kPerformanceParameters},
     {"Source", ARRAY_SIZE(kSourceParameters), 0, {0, 0}, kSourceParameters},
     {"Routing", ARRAY_SIZE(kRoutingParameters), 0, {0, 0}, kRoutingParameters},
 };
@@ -86,6 +120,7 @@ struct Algorithm : public _NT_algorithm {
     bool cardMounted;
     bool streamOpen;
     SourceMode activeSource;
+    bool alternateControls;
 };
 
 void calculateRequirements(_NT_algorithmRequirements& requirements,
@@ -123,7 +158,36 @@ _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& memory,
     algorithm->cardMounted = false;
     algorithm->streamOpen = false;
     algorithm->activeSource = kSourceLive;
+    algorithm->alternateControls = false;
     return algorithm;
+}
+
+float stretchValue(int32_t value) {
+    const float normalized = static_cast<float>(value) * 0.01f;
+    return std::pow(1.0f - normalized, 2.5f);
+}
+
+float thresholdValue(int32_t value) {
+    const float normalized = static_cast<float>(value) * 0.01f;
+    if (normalized > 0.99f) return 1.0e9f;
+    return normalized <= 0.9f
+        ? normalized * (4.0f / 0.9f)
+        : 4.0f + (normalized - 0.9f) * 40.0f;
+}
+
+void applyProcessingControls(Algorithm* algorithm) {
+    algorithm->processor->setPitchSemitones(
+        static_cast<float>(algorithm->v[kParamPitch]) * 0.1f);
+    algorithm->processor->setStretch(stretchValue(algorithm->v[kParamStretch]));
+    algorithm->processor->setTransientThreshold(
+        thresholdValue(algorithm->v[kParamThreshold]));
+    algorithm->processor->setGrainSize(algorithm->v[kParamGrainSize]);
+    algorithm->processor->setQuality(
+        0.1f - static_cast<float>(algorithm->v[kParamQuality]) * 0.00099f);
+    algorithm->processor->setFeedback(
+        static_cast<float>(algorithm->v[kParamFeedback]) * 0.01f);
+    algorithm->processor->setMix(
+        static_cast<float>(algorithm->v[kParamMix]) * 0.01f);
 }
 
 bool catalogIndex(int32_t value, uint32_t count, uint32_t& index) {
@@ -223,6 +287,15 @@ void parameterChanged(_NT_algorithm* base, int parameter) {
         case kParamSample:
             openSelectedSample(algorithm);
             break;
+        case kParamPitch:
+        case kParamStretch:
+        case kParamThreshold:
+        case kParamGrainSize:
+        case kParamQuality:
+        case kParamFeedback:
+        case kParamMix:
+            applyProcessingControls(algorithm);
+            break;
         default:
             break;
     }
@@ -315,6 +388,10 @@ void step(_NT_algorithm* base, float* busFrames, int numFramesBy4) {
                  algorithm->v[kParamSource] == kSourceSample
                      ? kSourceSample : kSourceLive);
     updateCardState(algorithm);
+    // Host parameter mapping can update v[] between callbacks; applying the
+    // linked controls here keeps UI, mapped CV, live, and sample processing on
+    // the same confirmed Capicola control surface.
+    applyProcessingControls(algorithm);
 
     const float* left = nullptr;
     const float* right = nullptr;
@@ -370,6 +447,110 @@ void step(_NT_algorithm* base, float* busFrames, int numFramesBy4) {
                 algorithm->v[kParamRightOutputMode] != 0);
 }
 
+bool draw(_NT_algorithm* base) {
+    Algorithm* algorithm = static_cast<Algorithm*>(base);
+    char text[48];
+    const char* source = algorithm->v[kParamSource] == kSourceSample
+        ? "SAMPLE" : "LIVE";
+    std::snprintf(text, sizeof(text), "CAPICOLA  %s", source);
+    NT_drawText(0, 10, text);
+
+    const int params[2][3] = {
+        {kParamStretch, kParamThreshold, kParamFeedback},
+        {kParamPitch, kParamGrainSize, kParamQuality},
+    };
+    const char* labels[2][3] = {
+        {"STRETCH", "THRESH", "FEEDBACK"},
+        {"PITCH", "GRAIN", "QUALITY"},
+    };
+    const int row = algorithm->alternateControls ? 1 : 0;
+    for (int i = 0; i < 3; ++i) {
+        NT_drawText(i * 43, 29, labels[row][i], 8);
+        std::snprintf(text, sizeof(text), "%ld",
+                      static_cast<long>(algorithm->v[params[row][i]]));
+        NT_drawText(i * 43, 42, text);
+    }
+    std::snprintf(text, sizeof(text), "%s  MIX %ld%%",
+                  algorithm->alternateControls ? "ALT" : "MAIN",
+                  static_cast<long>(algorithm->v[kParamMix]));
+    NT_drawText(0, 60, text, 12);
+    return true;
+}
+
+uint32_t hasCustomUi(_NT_algorithm*) {
+    return kNT_potL | kNT_potC | kNT_potR |
+           kNT_potButtonL | kNT_potButtonC | kNT_potButtonR |
+           kNT_encoderL | kNT_encoderR |
+           kNT_encoderButtonL | kNT_encoderButtonR;
+}
+
+bool pressed(const _NT_uiData& data, uint16_t control) {
+    return (data.controls & control) != 0 && (data.lastButtons & control) == 0;
+}
+
+void setFromUi(Algorithm* algorithm, int parameter, int value) {
+    const _NT_parameter& definition = algorithm->params[parameter];
+    if (value < definition.min) value = definition.min;
+    if (value > definition.max) value = definition.max;
+    NT_setParameterFromUi(NT_algorithmIndex(algorithm),
+                          parameter + NT_parameterOffset(), value);
+}
+
+void customUi(_NT_algorithm* base, const _NT_uiData& data) {
+    Algorithm* algorithm = static_cast<Algorithm*>(base);
+    if (pressed(data, kNT_potButtonL) || pressed(data, kNT_potButtonC) ||
+        pressed(data, kNT_potButtonR)) {
+        algorithm->alternateControls = !algorithm->alternateControls;
+    }
+
+    const int params[2][3] = {
+        {kParamStretch, kParamThreshold, kParamFeedback},
+        {kParamPitch, kParamGrainSize, kParamQuality},
+    };
+    const uint16_t potControls[3] = {kNT_potL, kNT_potC, kNT_potR};
+    const int row = algorithm->alternateControls ? 1 : 0;
+    for (int i = 0; i < 3; ++i) {
+        if ((data.controls & potControls[i]) != 0) {
+            const _NT_parameter& definition = algorithm->params[params[row][i]];
+            const int value = definition.min + static_cast<int>(
+                data.pots[i] * static_cast<float>(definition.max - definition.min) + 0.5f);
+            setFromUi(algorithm, params[row][i], value);
+        }
+    }
+
+    if (data.encoders[0] != 0) {
+        setFromUi(algorithm, kParamSource,
+                  algorithm->v[kParamSource] + data.encoders[0]);
+    }
+    if (pressed(data, kNT_encoderButtonL) &&
+        algorithm->v[kParamSource] == kSourceSample) {
+        // Folder/sample browsing remains the host's temporary parameter view;
+        // this confirms its displayed sample from the performance screen.
+        openSelectedSample(algorithm);
+    }
+    if (data.encoders[1] != 0) {
+        setFromUi(algorithm, kParamMix,
+                  algorithm->v[kParamMix] + data.encoders[1]);
+    }
+    if (pressed(data, kNT_encoderButtonR)) {
+        algorithm->processor->triggerSlice();
+    }
+}
+
+void setupUi(_NT_algorithm* base, _NT_float3& pots) {
+    Algorithm* algorithm = static_cast<Algorithm*>(base);
+    const int params[2][3] = {
+        {kParamStretch, kParamThreshold, kParamFeedback},
+        {kParamPitch, kParamGrainSize, kParamQuality},
+    };
+    const int row = algorithm->alternateControls ? 1 : 0;
+    for (int i = 0; i < 3; ++i) {
+        const _NT_parameter& definition = algorithm->params[params[row][i]];
+        pots[i] = static_cast<float>(algorithm->v[params[row][i]] - definition.min) /
+                  static_cast<float>(definition.max - definition.min);
+    }
+}
+
 static const _NT_factory kFactory = {
     .guid = NT_MULTICHAR('C', 'a', 'N', 'T'),
     .name = "Capicola",
@@ -382,13 +563,13 @@ static const _NT_factory kFactory = {
     .construct = construct,
     .parameterChanged = parameterChanged,
     .step = step,
-    .draw = nullptr,
+    .draw = draw,
     .midiRealtime = nullptr,
     .midiMessage = nullptr,
     .tags = kNT_tagEffect,
-    .hasCustomUi = nullptr,
-    .customUi = nullptr,
-    .setupUi = nullptr,
+    .hasCustomUi = hasCustomUi,
+    .customUi = customUi,
+    .setupUi = setupUi,
     .serialise = nullptr,
     .deserialise = nullptr,
     .midiSysEx = nullptr,

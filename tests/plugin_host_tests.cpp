@@ -24,6 +24,8 @@ uint32_t gStreamClock = 0;
 uint32_t gOpenedFolder = 0;
 uint32_t gOpenedSample = 0;
 float gOpenedSpeed = 0.0f;
+_NT_algorithm* gAlgorithm = nullptr;
+const _NT_factory* gFactory = nullptr;
 
 int fail(const char* message) {
     std::printf("FAIL: %s\n", message);
@@ -115,9 +117,23 @@ extern "C" int32_t NT_algorithmIndex(const _NT_algorithm*) {
 
 extern "C" void NT_updateParameterDefinition(uint32_t, uint32_t) {}
 
+extern "C" uint32_t NT_parameterOffset() {
+    return 0;
+}
+
+extern "C" void NT_setParameterFromUi(uint32_t, uint32_t parameter, int16_t value) {
+    if (gAlgorithm != nullptr && gFactory != nullptr) {
+        const_cast<int16_t*>(gAlgorithm->v)[parameter] = value;
+        gFactory->parameterChanged(gAlgorithm, static_cast<int>(parameter));
+    }
+}
+
+void NT_drawText(int, int, const char*, int, _NT_textAlignment, _NT_textSize) {}
+
 int main() {
     const auto* factory = reinterpret_cast<const _NT_factory*>(
         pluginEntry(kNT_selector_factoryInfo, 0));
+    gFactory = factory;
     if (factory == nullptr || pluginEntry(kNT_selector_version, 0) != kNT_apiVersion13) {
         return fail("API v13 factory is unavailable");
     }
@@ -147,10 +163,20 @@ int main() {
     const int rightMode = findParameter(algorithm, count, "Right output mode");
     const int source = findParameter(algorithm, count, "Source");
     const int folder = findParameter(algorithm, count, "Folder");
+    gAlgorithm = algorithm;
     const int sample = findParameter(algorithm, count, "Sample");
+    const int pitch = findParameter(algorithm, count, "Pitch");
+    const int stretch = findParameter(algorithm, count, "Stretch");
+    const int threshold = findParameter(algorithm, count, "Threshold");
+    const int grain = findParameter(algorithm, count, "Grain Size");
+    const int quality = findParameter(algorithm, count, "Quality");
+    const int feedback = findParameter(algorithm, count, "Feedback");
+    const int mix = findParameter(algorithm, count, "Mix");
     if (leftInput < 0 || rightInput < 0 || leftOutput < 0 || leftMode < 0 ||
-        rightOutput < 0 || rightMode < 0 || source < 0 || folder < 0 || sample < 0) {
-        return fail("expected source and routing parameters are unavailable");
+        rightOutput < 0 || rightMode < 0 || source < 0 || folder < 0 || sample < 0 ||
+        pitch < 0 || stretch < 0 || threshold < 0 || grain < 0 || quality < 0 ||
+        feedback < 0 || mix < 0) {
+        return fail("expected performance, source, and routing parameters are unavailable");
     }
 
     std::vector<int16_t> values(requirements.numParameters, 0);
@@ -161,7 +187,53 @@ int main() {
     values[rightOutput] = 14;
     values[rightMode] = 1;
     values[source] = 0;
+    values[grain] = 128;
+    values[quality] = 100;
+    values[mix] = 100;
     algorithm->v = values.data();
+
+    const uint32_t requiredPerformanceControls =
+        kNT_potL | kNT_potC | kNT_potR |
+        kNT_potButtonL | kNT_potButtonC | kNT_potButtonR |
+        kNT_encoderL | kNT_encoderR | kNT_encoderButtonL | kNT_encoderButtonR;
+    if (factory->hasCustomUi == nullptr || factory->customUi == nullptr ||
+        factory->setupUi == nullptr || factory->draw == nullptr ||
+        (factory->hasCustomUi(algorithm) & requiredPerformanceControls) !=
+            requiredPerformanceControls) {
+        return fail("approved performance controls are not exposed by a custom UI");
+    }
+    _NT_float3 initialPots{};
+    factory->setupUi(algorithm, initialPots);
+    _NT_uiData ui{};
+    ui.controls = kNT_potL;
+    ui.pots[0] = 1.0f;
+    factory->customUi(algorithm, ui);
+    if (values[stretch] != 100) {
+        return fail("main performance pot did not control Stretch");
+    }
+    ui = {};
+    ui.controls = kNT_potButtonL;
+    factory->customUi(algorithm, ui);
+    ui = {};
+    ui.controls = kNT_potL;
+    ui.pots[0] = 0.75f;
+    factory->customUi(algorithm, ui);
+    if (values[pitch] != 60) {
+        return fail("alternate performance pot did not control Pitch");
+    }
+    ui = {};
+    ui.encoders[1] = -10;
+    factory->customUi(algorithm, ui);
+    if (values[mix] != 90) {
+        return fail("right encoder did not control Mix");
+    }
+    // Restore neutral processing for source-path assertions below.
+    values[pitch] = 0;
+    values[stretch] = 0;
+    values[mix] = 100;
+    factory->parameterChanged(algorithm, pitch);
+    factory->parameterChanged(algorithm, stretch);
+    factory->parameterChanged(algorithm, mix);
 
     std::vector<float> buses(kNT_lastBus * kFrames, 0.0f);
     int clock = 0;
@@ -182,15 +254,45 @@ int main() {
 
     // Select the host-catalogued stereo sample. NaN on both live buses proves
     // that sample mode does not read or mix either live source.
-    values[source] = 1;
     values[folder] = 0;
     values[sample] = 1;
     const uint32_t opensBeforeSampleSource = gStreamOpenCalls;
-    factory->parameterChanged(algorithm, source);
-    if (gStreamOpenCalls != opensBeforeSampleSource) {
-        return fail("entering Sample mode opened before Sample confirmation");
+    ui = {};
+    ui.encoders[0] = 1;
+    factory->customUi(algorithm, ui);
+    if (values[source] != 1 || gStreamOpenCalls != opensBeforeSampleSource) {
+        return fail("performance UI did not select Sample mode without opening early");
     }
-    factory->parameterChanged(algorithm, sample);
+    ui = {};
+    ui.controls = kNT_encoderButtonL;
+    factory->customUi(algorithm, ui);
+    if (gStreamOpenCalls != opensBeforeSampleSource + 1) {
+        return fail("performance UI did not confirm the selected sample");
+    }
+
+    // Mix is a confirmed Capicola control: exercise it from the approved
+    // performance interface while the selected sample is the active source.
+    ui = {};
+    ui.encoders[1] = -100;
+    factory->customUi(algorithm, ui);
+    const uint32_t dryClock = gStreamClock;
+    factory->step(algorithm, buses.data(), kFrames / 4);
+    const float* dryLeft = buses.data() + 12 * kFrames;
+    const float* dryRight = buses.data() + 13 * kFrames;
+    for (int i = 0; i < kFrames; ++i) {
+        const float expectedLeft = std::sin(
+            2.0f * kPi * 330.0f * static_cast<float>(dryClock + i) / 48000.0f);
+        const float expectedRight = 0.35f * std::sin(
+            2.0f * kPi * 710.0f * static_cast<float>(dryClock + i) / 48000.0f);
+        if (std::fabs(dryLeft[i] - expectedLeft) > 1.0e-6f ||
+            std::fabs(dryRight[i] - expectedRight) > 1.0e-6f) {
+            return fail("performance Mix control did not affect selected-sample processing");
+        }
+    }
+    ui = {};
+    ui.encoders[1] = 100;
+    factory->customUi(algorithm, ui);
+
     double sampleEnergy = 0.0;
     double stereoDifference = 0.0;
     for (int block = 0; block < 320; ++block) {
