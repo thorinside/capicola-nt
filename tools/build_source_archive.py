@@ -119,6 +119,7 @@ def main() -> None:
             f"{PREFIX}/patches/capicola/0001-avoid-int64-double-runtime-helper.patch",
             f"{PREFIX}/patches/capicola/0002-make-ring-reset-constant-time.patch",
             f"{PREFIX}/patches/capicola/0003-bound-sparse-window-seeks.patch",
+            f"{PREFIX}/patches/capicola/0004-initialize-shaper-tables-in-place.patch",
             f"{PREFIX}/src/capicola_nt.cpp",
             f"{PREFIX}/tools/prepare_capicola_overlay.sh",
             f"{PREFIX}/tools/verify_plugin_symbols.py",

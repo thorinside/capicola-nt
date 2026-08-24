@@ -37,6 +37,8 @@ construction; the audio path performs no heap allocation. Typed objects and
 scratch buffers are explicitly aligned within those byte allocations. Engine
 reset is constant-time with respect to the large sparse rings: it resets their
 live range and sentinel rather than clearing roughly half a megabyte of DRAM.
+The three persistent shaper tables are initialized directly in that storage;
+the ARM build rejects any function whose static stack requirement exceeds 1 KiB.
 The audio callback also performs no SD catalogue queries, parameter-definition
 updates, or stream opens. A missing source block or non-finite DSP result ramps
 the last valid output to silence; catalogue refresh and sample recovery wait for

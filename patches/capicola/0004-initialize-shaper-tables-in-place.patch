@@ -1,0 +1,44 @@
+diff --git a/Shapers.h b/Shapers.h
+--- a/Shapers.h
++++ b/Shapers.h
+@@ -3,3 +3,2 @@
+ #include "TabulatedFunction.h"
+-#include "Tabulator.h"
+ #include "functors.h"
+@@ -17,7 +16,6 @@ public:
+     void Init()
+     {
+-        Tabulator<float, kSize> tab;
+-        sin_   = tab.tabulate<Mirror::Odd,  Extend::Wrap >([](float x){ return sinf(x); },               0.0f, kPi);
+-        quake_ = tab.tabulate<Mirror::Odd,  Extend::Clamp>(Quake{},                                      0.0f, 4.0f);
+-        sinc_  = tab.tabulate<Mirror::Odd,  Extend::Clamp>([](float x){ return SincShaper{}(x, 0.25f); }, 0.0f, 8.0f);
++        sin_.Init([](float x){ return sinf(x); },               0.0f, kPi);
++        quake_.Init(Quake{},                                    0.0f, 4.0f);
++        sinc_.Init([](float x){ return SincShaper{}(x, 0.25f); }, 0.0f, 8.0f);
+     }
+diff --git a/TabulatedFunction.h b/TabulatedFunction.h
+--- a/TabulatedFunction.h
++++ b/TabulatedFunction.h
+@@ -28,3 +28,22 @@ public:
+ public:
+     TabulatedFunction() {}
++
++    // Populate persistent storage directly. Returning a complete table by value
++    // requires two n-element temporaries on embedded targets, which can exhaust
++    // the plug-in construction task's stack before audio starts.
++    template <typename Func>
++    void Init(Func function, T min, T max)
++    {
++        min_       = min;
++        max_       = max;
++        scale_     = static_cast<T>(n - 1) / (max - min);
++        period_    = (M == Mirror::None) ? (max - min) : (T(2) * max);
++        invPeriod_ = T(1) / period_;
++        T increment = (max - min) / static_cast<T>(n - 1);
++        T val       = min;
++        for (auto& cell : table_) {
++            cell = function(val);
++            val += increment;
++        }
++    }
+     TabulatedFunction(std::array<T, n> table, T min, T max)

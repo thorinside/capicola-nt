@@ -107,14 +107,14 @@ arbitrary paths itself.
    opened; **SAMPLE WAIT** means it did not.
 
 Samples play once, forward, from the beginning. To restart the selected sample,
-confirm the **Sample** parameter again or repeat the selection. Mono samples
+repeat the folder/sample selection. Mono samples
 feed both channels; stereo samples keep their left/right order.
 
 The Source, Folder, and Sample selections are ordinary NT preset parameters.
 Keep the SD sample catalogue stable when a preset depends on a sample. If the
 saved catalogue indices are invalid or the selected file is unreadable,
 Capicola remains in Sample mode and outputs silence—it does not switch to Live.
-After removing or remounting the SD card, confirm **Sample** again to reopen it;
+After removing or remounting the SD card, repeat the sample selection to reopen it;
 Capicola does not perform catalogue discovery or stream setup in the audio
 callback.
 
@@ -175,9 +175,9 @@ analysis signal and an audio output—to the same bus.
 - **A mono patch is only on the left:** set Right input to `None` to normalize
   Left input to both channels.
 - **The display says SAMPLE WAIT:** make sure the SD card is mounted and the
-  selected folder/sample still exists, then confirm Sample or select it again.
-- **A sample stops:** sample playback is intentionally one-shot; confirm the
-  Sample parameter again to restart it.
+  selected folder/sample still exists, then repeat the folder/sample selection.
+- **A sample stops:** sample playback is intentionally one-shot; repeat the
+  folder/sample selection to restart it.
 - **The level keeps increasing:** set Feedback below 100%, preferably to 0%
   while diagnosing the patch.
 - **CV is not changing a control:** use the NT parameter-mapping interface;

@@ -53,7 +53,7 @@ $(PLUGIN): src/capicola_nt.cpp include/capicola_nt/live_path.h \
 	mkdir -p "$(@D)"
 	$(ARM_CXX) -std=gnu++17 -mcpu=cortex-m7 -mfpu=fpv5-d16 \
 		-mfloat-abi=hard -mthumb -fno-rtti -fno-exceptions -Os -fPIC \
-		-Wall -Wextra -Werror \
+		-Wall -Wextra -Werror -Wstack-usage=1024 \
 		-Ivendor/distingNT_API/include $(COMMON_INCLUDES) -c -o "$@" $<
 
 inspect-plugin: $(PLUGIN)

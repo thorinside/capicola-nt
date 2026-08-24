@@ -234,6 +234,12 @@ int main() {
         return fail("expected performance, source, and routing parameters are unavailable");
     }
 
+    if (algorithm->parameters[source].unit != kNT_unitEnum ||
+        algorithm->parameters[folder].unit != kNT_unitNone ||
+        algorithm->parameters[sample].unit != kNT_unitNone) {
+        return fail("stream source parameters advertise a host filesystem editor");
+    }
+
     const int analysisOutputs[] = {
         inputTransientOutput, outputTransientOutput,
         inputEnvelopeOutput, outputEnvelopeOutput,
@@ -626,7 +632,7 @@ int main() {
     if (gStreamOpenCalls != opensBeforeSampleSource ||
         !drawnTextContains("SELECT SAMPLE") ||
         !drawnTextContains("Stereo.wav") || !drawnTextContains("PRESS: LOAD")) {
-        return fail("folder confirmation did not open temporary sample selection");
+        return fail("folder selector press did not open temporary sample selection");
     }
     ui = {};
     ui.controls = kNT_encoderButtonL;
@@ -635,7 +641,7 @@ int main() {
     factory->draw(algorithm);
     if (gStreamOpenCalls != opensBeforeSampleSource + 1 ||
         !drawnTextContains("CAPICOLA   SAMPLE PLAY")) {
-        return fail("sample confirmation did not return to the performance screen");
+        return fail("sample selector press did not return to the performance screen");
     }
 
     // All five audited secondary controls must alter their intended linked
@@ -751,7 +757,7 @@ int main() {
     }
 
     // A folder change updates the Sample range and invalidates the old stream,
-    // but only explicit Sample confirmation may open the new resource.
+    // but only explicit Sample selection may open the new resource.
     const uint32_t opensBeforeFolderChange = gStreamOpenCalls;
     const uint32_t rendersBeforeFolderChange = gStreamRenderCalls;
     values[folder] = 1;
@@ -760,12 +766,12 @@ int main() {
     factory->step(algorithm, buses.data(), kFrames / 4);
     if (gStreamOpenCalls != opensBeforeFolderChange ||
         gStreamRenderCalls != rendersBeforeFolderChange) {
-        return fail("folder change opened or rendered before Sample confirmation");
+        return fail("folder change opened or rendered before Sample selection");
     }
     factory->parameterChanged(algorithm, sample);
     if (gStreamOpenCalls != opensBeforeFolderChange + 1 ||
         gOpenedFolder != 1 || gOpenedSample != 0) {
-        return fail("Sample confirmation did not open the selected folder resource");
+        return fail("Sample selection did not open the selected folder resource");
     }
     for (int block = 0; block < 300; ++block) {
         factory->step(algorithm, buses.data(), kFrames / 4);
@@ -784,7 +790,7 @@ int main() {
     // Card loss or a zero-frame stream result is handled inside step() only by
     // dropping/fading the block and closing the stream. Remounting must not run
     // catalogue discovery or reopen work on the audio thread. Explicit Sample
-    // confirmation performs recovery outside that thread.
+    // selection performs recovery outside that thread.
     const uint32_t opensBeforeRemount = gStreamOpenCalls;
     const uint32_t rendersBeforeRemount = gStreamRenderCalls;
     const uint32_t mountChecksBeforeRemount = gCardMountChecks;
@@ -814,11 +820,11 @@ int main() {
     if (gStreamOpenCalls != opensBeforeRemount + 1 ||
         gStreamRenderCalls != rendersBeforeRemount + 2 ||
         gOpenedFolder != 1 || gOpenedSample != 0) {
-        return fail("explicit Sample confirmation did not recover after remount");
+        return fail("explicit Sample selection did not recover after remount");
     }
 
     // Missing or moved catalogue entry: the saved folder index is no longer
-    // present. Explicit confirmation performs no invalid lookup/open and Sample
+    // present. Explicit selection performs no invalid lookup/open and Sample
     // mode remains selected.
     gCardMounted = false;
     factory->step(algorithm, buses.data(), kFrames / 4);
