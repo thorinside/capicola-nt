@@ -126,20 +126,19 @@ _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& memory,
     return algorithm;
 }
 
-uint32_t boundedCatalogIndex(int16_t value, uint32_t count) {
-    if (count == 0) {
-        return 0;
+bool catalogIndex(int32_t value, uint32_t count, uint32_t& index) {
+    if (value < 0) {
+        return false;
     }
-    const uint32_t index = value < 0 ? 0U : static_cast<uint32_t>(value);
-    return index < count ? index : count - 1U;
+    index = static_cast<uint32_t>(value);
+    return index < count;
 }
 
 void updateSampleRange(Algorithm* algorithm) {
     const uint32_t folderCount = NT_getNumSampleFolders();
-    const uint32_t folder = boundedCatalogIndex(
-        algorithm->v[kParamFolder], folderCount);
+    uint32_t folder = 0;
     _NT_wavFolderInfo folderInfo{};
-    if (folderCount != 0) {
+    if (catalogIndex(algorithm->v[kParamFolder], folderCount, folder)) {
         NT_getSampleFolderInfo(folder, folderInfo);
     }
     algorithm->params[kParamSample].max = folderInfo.numSampleFiles == 0
@@ -161,18 +160,18 @@ void openSelectedSample(Algorithm* algorithm) {
     }
 
     const uint32_t folderCount = NT_getNumSampleFolders();
-    if (folderCount == 0) {
+    uint32_t folder = 0;
+    if (!catalogIndex(algorithm->v[kParamFolder], folderCount, folder)) {
         return;
     }
-    const uint32_t folder = boundedCatalogIndex(
-        algorithm->v[kParamFolder], folderCount);
     _NT_wavFolderInfo folderInfo{};
     NT_getSampleFolderInfo(folder, folderInfo);
-    if (folderInfo.numSampleFiles == 0) {
+    uint32_t sample = 0;
+    if (!catalogIndex(algorithm->v[kParamSample],
+                      folderInfo.numSampleFiles,
+                      sample)) {
         return;
     }
-    const uint32_t sample = boundedCatalogIndex(
-        algorithm->v[kParamSample], folderInfo.numSampleFiles);
     _NT_wavInfo info{};
     NT_getSampleFileInfo(folder, sample, info);
     if (info.sampleRate == 0 || NT_globals.sampleRate == 0) {
@@ -202,9 +201,6 @@ void selectSource(Algorithm* algorithm, SourceMode source) {
     algorithm->activeSource = source;
     algorithm->processor->init();
     algorithm->streamOpen = false;
-    if (source == kSourceSample) {
-        openSelectedSample(algorithm);
-    }
 }
 
 void parameterChanged(_NT_algorithm* base, int parameter) {
@@ -216,9 +212,12 @@ void parameterChanged(_NT_algorithm* base, int parameter) {
                              ? kSourceSample : kSourceLive);
             break;
         case kParamFolder:
+            algorithm->streamOpen = false;
+            if (algorithm->activeSource == kSourceSample) {
+                algorithm->processor->init();
+            }
             if (algorithm->cardMounted) {
                 updateSampleRange(algorithm);
-                openSelectedSample(algorithm);
             }
             break;
         case kParamSample:
@@ -241,22 +240,27 @@ int parameterString(_NT_algorithm* base, int parameter, int value, char* buffer)
         return 0;
     }
     if (parameter == kParamFolder) {
+        uint32_t folder = 0;
+        if (!catalogIndex(value, folderCount, folder)) {
+            return 0;
+        }
         _NT_wavFolderInfo info{};
-        NT_getSampleFolderInfo(boundedCatalogIndex(value, folderCount), info);
+        NT_getSampleFolderInfo(folder, info);
         name = info.name;
     } else if (parameter == kParamSample) {
-        const uint32_t folder = boundedCatalogIndex(
-            algorithm->v[kParamFolder], folderCount);
+        uint32_t folder = 0;
+        if (!catalogIndex(algorithm->v[kParamFolder], folderCount, folder)) {
+            return 0;
+        }
         _NT_wavFolderInfo folderInfo{};
         NT_getSampleFolderInfo(folder, folderInfo);
-        if (folderInfo.numSampleFiles != 0) {
-            _NT_wavInfo info{};
-            NT_getSampleFileInfo(
-                folder,
-                boundedCatalogIndex(value, folderInfo.numSampleFiles),
-                info);
-            name = info.name;
+        uint32_t sample = 0;
+        if (!catalogIndex(value, folderInfo.numSampleFiles, sample)) {
+            return 0;
         }
+        _NT_wavInfo info{};
+        NT_getSampleFileInfo(folder, sample, info);
+        name = info.name;
     }
     if (name == nullptr) {
         return 0;
@@ -283,7 +287,6 @@ void updateCardState(Algorithm* algorithm) {
     NT_updateParameterDefinition(NT_algorithmIndex(algorithm), kParamFolder);
     if (mounted) {
         updateSampleRange(algorithm);
-        openSelectedSample(algorithm);
     }
 }
 

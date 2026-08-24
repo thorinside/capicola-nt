@@ -17,6 +17,9 @@ float gWorkBuffer[kFrames * 2] = {};
 bool gCardMounted = true;
 uint32_t gStreamRenderCalls = 0;
 uint32_t gStreamOpenCalls = 0;
+uint32_t gFolderInfoCalls = 0;
+uint32_t gFileInfoCalls = 0;
+bool gInvalidCatalogLookup = false;
 uint32_t gStreamClock = 0;
 uint32_t gOpenedFolder = 0;
 uint32_t gOpenedSample = 0;
@@ -57,16 +60,26 @@ extern "C" uint32_t NT_getNumSampleFolders() {
 }
 
 extern "C" void NT_getSampleFolderInfo(uint32_t folder, _NT_wavFolderInfo& info) {
+    ++gFolderInfoCalls;
+    if (folder >= 2) {
+        gInvalidCatalogLookup = true;
+        return;
+    }
     static const char* names[] = {"Drums", "Textures"};
-    info.name = names[folder < 2 ? folder : 0];
+    info.name = names[folder];
     info.numSampleFiles = folder == 0 ? 2 : 1;
 }
 
 extern "C" void NT_getSampleFileInfo(uint32_t folder,
                                        uint32_t sample,
                                        _NT_wavInfo& info) {
+    ++gFileInfoCalls;
+    if (folder >= 2 || sample >= (folder == 0 ? 2U : 1U)) {
+        gInvalidCatalogLookup = true;
+        return;
+    }
     static const char* names[] = {"Mono.wav", "Stereo.wav", "Cloud.wav"};
-    info.name = folder == 0 ? names[sample < 2 ? sample : 0] : names[2];
+    info.name = folder == 0 ? names[sample] : names[2];
     info.numFrames = 48000;
     info.sampleRate = folder == 1 ? 24000 : 48000;
     info.channels = sample == 0 ? kNT_WavMono : kNT_WavStereo;
@@ -172,7 +185,11 @@ int main() {
     values[source] = 1;
     values[folder] = 0;
     values[sample] = 1;
+    const uint32_t opensBeforeSampleSource = gStreamOpenCalls;
     factory->parameterChanged(algorithm, source);
+    if (gStreamOpenCalls != opensBeforeSampleSource) {
+        return fail("entering Sample mode opened before Sample confirmation");
+    }
     factory->parameterChanged(algorithm, sample);
     double sampleEnergy = 0.0;
     double stereoDifference = 0.0;
@@ -200,12 +217,22 @@ int main() {
         return fail("stereo sample was not processed through both Capicola channels");
     }
 
-    // Folder changes update selection and sample-rate conversion before opening.
+    // A folder change updates the Sample range and invalidates the old stream,
+    // but only explicit Sample confirmation may open the new resource.
+    const uint32_t opensBeforeFolderChange = gStreamOpenCalls;
+    const uint32_t rendersBeforeFolderChange = gStreamRenderCalls;
     values[folder] = 1;
     values[sample] = 0;
     factory->parameterChanged(algorithm, folder);
-    if (gOpenedFolder != 1 || gOpenedSample != 0) {
-        return fail("folder change did not open its selected sample");
+    factory->step(algorithm, buses.data(), kFrames / 4);
+    if (gStreamOpenCalls != opensBeforeFolderChange ||
+        gStreamRenderCalls != rendersBeforeFolderChange) {
+        return fail("folder change opened or rendered before Sample confirmation");
+    }
+    factory->parameterChanged(algorithm, sample);
+    if (gStreamOpenCalls != opensBeforeFolderChange + 1 ||
+        gOpenedFolder != 1 || gOpenedSample != 0) {
+        return fail("Sample confirmation did not open the selected folder resource");
     }
     for (int block = 0; block < 300; ++block) {
         factory->step(algorithm, buses.data(), kFrames / 4);
@@ -218,6 +245,77 @@ int main() {
     for (int i = 0; i < kFrames; ++i) {
         if (monoLeft[i] != monoRight[i]) {
             return fail("host-delivered mono sample was not duplicated to both channels");
+        }
+    }
+
+    const uint32_t opensBeforeRemount = gStreamOpenCalls;
+    const uint32_t rendersBeforeRemount = gStreamRenderCalls;
+    gCardMounted = false;
+    factory->step(algorithm, buses.data(), kFrames / 4);
+    gCardMounted = true;
+    factory->step(algorithm, buses.data(), kFrames / 4);
+    if (gStreamOpenCalls != opensBeforeRemount ||
+        gStreamRenderCalls != rendersBeforeRemount) {
+        return fail("card remount reopened or rendered before Sample confirmation");
+    }
+
+    // Invalid catalogue values keep Sample mode silent and never substitute a
+    // different folder or file in lookups, display strings, or stream opens.
+    const uint32_t opensBeforeInvalid = gStreamOpenCalls;
+    const uint32_t rendersBeforeInvalid = gStreamRenderCalls;
+    const uint32_t folderInfoBeforeInvalid = gFolderInfoCalls;
+    const uint32_t fileInfoBeforeInvalid = gFileInfoCalls;
+    values[folder] = 99;
+    values[sample] = 99;
+    factory->parameterChanged(algorithm, folder);
+    factory->parameterChanged(algorithm, sample);
+    char invalidText[kNT_parameterStringSize] = {};
+    if (factory->parameterString(algorithm, folder, 99, invalidText) != 0 ||
+        factory->parameterString(algorithm, sample, 99, invalidText) != 0) {
+        return fail("invalid catalogue value displayed a substituted name");
+    }
+    factory->step(algorithm, buses.data(), kFrames / 4);
+    if (values[source] != 1 || gStreamOpenCalls != opensBeforeInvalid ||
+        gStreamRenderCalls != rendersBeforeInvalid ||
+        gFolderInfoCalls != folderInfoBeforeInvalid ||
+        gFileInfoCalls != fileInfoBeforeInvalid || gInvalidCatalogLookup) {
+        return fail("invalid folder substituted or accessed another resource");
+    }
+    const float* silentLeft = buses.data() + 12 * kFrames;
+    const float* silentRight = buses.data() + 13 * kFrames;
+    for (int i = 0; i < kFrames; ++i) {
+        if (silentLeft[i] != 0.0f || silentRight[i] != 0.0f) {
+            return fail("invalid folder did not leave Sample mode silent");
+        }
+    }
+    values[folder] = -1;
+    factory->parameterChanged(algorithm, folder);
+    factory->parameterChanged(algorithm, sample);
+    if (factory->parameterString(algorithm, folder, -1, invalidText) != 0 ||
+        gStreamOpenCalls != opensBeforeInvalid || gInvalidCatalogLookup) {
+        return fail("negative folder value substituted another resource");
+    }
+
+    values[folder] = 0;
+    factory->parameterChanged(algorithm, folder);
+    const uint32_t opensBeforeInvalidSample = gStreamOpenCalls;
+    const uint32_t filesBeforeInvalidSample = gFileInfoCalls;
+    values[sample] = 99;
+    factory->parameterChanged(algorithm, sample);
+    values[sample] = -1;
+    factory->parameterChanged(algorithm, sample);
+    if (factory->parameterString(algorithm, sample, -1, invalidText) != 0 ||
+        gStreamOpenCalls != opensBeforeInvalidSample ||
+        gFileInfoCalls != filesBeforeInvalidSample || gInvalidCatalogLookup) {
+        return fail("invalid sample substituted or opened another file");
+    }
+    factory->step(algorithm, buses.data(), kFrames / 4);
+    silentLeft = buses.data() + 12 * kFrames;
+    silentRight = buses.data() + 13 * kFrames;
+    for (int i = 0; i < kFrames; ++i) {
+        if (values[source] != 1 || silentLeft[i] != 0.0f ||
+            silentRight[i] != 0.0f) {
+            return fail("invalid sample did not leave Sample mode silent");
         }
     }
 
