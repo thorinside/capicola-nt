@@ -1,0 +1,105 @@
+# Capicola for disting NT — Technical reference
+
+This is the compact maintainer reference for Capicola for disting NT. Players
+should start with the [installation and user guide](../README.md).
+
+## Released implementation
+
+The current published binary is
+[`v0.5.0`](https://github.com/thorinside/capicola-nt/releases/tag/v0.5.0).
+
+| Item | Value |
+| --- | --- |
+| Factory name | `Capicola` |
+| GUID | `ThCa` |
+| Factory tag | Effect |
+| Supported firmware baseline | disting NT 1.16.0 |
+| Plug-in API | v13 (`kNT_apiVersion13`) |
+| Audited audio rate | 48 kHz |
+| Installable asset | `capicola.o` |
+| Corresponding-source asset | `capicola-nt-source.tar.gz` |
+
+The wrapper is deliberately narrow. It links the pinned Capicola DSP, provides
+one stereo engine for mutually exclusive Live and Sample sources, exposes the
+audited processing controls, and uses ordinary NT parameter mapping for CV.
+Changing source resets the engine so history from the replaced source cannot
+sound afterward.
+
+Live mode reads the selected logical buses, with optional left-to-right mono
+normalization. Sample mode uses the API v13 folder catalogue and stream API;
+it opens the exact selected catalogue entry as a forward, sequential, one-shot
+stream. Both channels render to private scratch buffers before Add/Replace
+audio output writes. Four optional analysis signals replace their selected CV
+buses and default to `None`.
+
+The custom UI owns three pressable pots and two pressable encoders. Its MAIN/ALT
+performance hierarchy and temporary folder/sample selector are documented in
+the [user guide](../README.md). All twelve continuous processing controls remain
+ordinary host parameters on the Performance page.
+
+## Pinned source and platform
+
+Vendor code is linked through Git submodules rather than copied into the
+wrapper history:
+
+| Component | Repository | Commit |
+| --- | --- | --- |
+| Capicola | `heavylight-industries/capicola` | `f0fb61cfa7111067b4ec1a642d1b16a0910adb3b` |
+| distingNT_API | `expertsleepersltd/distingNT_API` | `cd12d876dbe060859828053efab1cbc98c9df251` |
+
+[`SUBMODULES.lock`](../SUBMODULES.lock) is the concise provenance record. The
+[capability audit](CAPABILITY_AUDIT.md) traces every exposed processing control
+to the pinned upstream implementation and records the NT-specific boundaries.
+
+## Build and verify
+
+An ARM GNU toolchain with `arm-none-eabi-c++`, `readelf`, and `nm` is required.
+
+```sh
+git submodule update --init --recursive
+make verify
+```
+
+`make verify` checks the capability and license ledgers, runs the upstream and
+host integration tests with warnings as errors, builds the ARM object, and
+verifies that it is an ELF32 little-endian ARM relocatable object exporting
+`pluginEntry`. The result is `build/plugins/capicola.o`.
+
+To prepare both public release assets:
+
+```sh
+make release-assets
+```
+
+This also builds `build/release/capicola-nt-source.tar.gz`. GitHub's automatic
+source snapshots omit submodule contents and are not the corresponding-source
+download for this project.
+
+## License and releases
+
+The wrapper and incorporated Capicola DSP are released under
+`AGPL-3.0-only`. The disting NT API dependency is MIT-licensed. See
+[`LICENSE`](../LICENSE), [`NOTICE`](../NOTICE),
+[`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md), and the
+[source offer](SOURCE_OFFER.md).
+
+After explicit owner approval, pushing a `v*` tag runs the release workflow.
+It verifies the tagged commit and publishes `capicola.o` beside the complete
+corresponding-source archive.
+
+## Detailed records
+
+These files retain the evidence and decisions that would make the player guide
+unnecessarily technical:
+
+- [Capability audit](CAPABILITY_AUDIT.md) — audited controls, ranges, sample
+  boundary, and pinned baseline
+- [Live routing](LIVE_ROUTING.md) — bus and Add/Replace behavior
+- [Sample source](SAMPLE_SOURCE.md) — catalogue, stream, preset, and remount
+  lifecycle
+- [Host modulation](HOST_MODULATION.md) — parameter-to-CV contract
+- [Analysis CV](ANALYSIS_CV.md) — optional output voltages and bus behavior
+- [Approved discovery Spec](APPROVED_SPEC.md) and
+  [implementation gate](IMPLEMENTATION_GATE.md) — product decisions and scope
+- [License audit](LICENSE_AUDIT.md) and [source offer](SOURCE_OFFER.md) — release
+  obligations
