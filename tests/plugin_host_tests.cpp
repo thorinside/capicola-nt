@@ -380,6 +380,43 @@ int main() {
         return fail("an assigned analysis signal did not reach its CV bus");
     }
 
+    // The shared Transient Threshold must govern the post-mix detector just as
+    // it governs both input detectors upstream. At the audited top-of-range
+    // setting, allow any existing gate to expire and then prove fresh output
+    // peaks remain muted on the still-assigned CV bus.
+    values[threshold] = 100;
+    for (int block = 0; block < 20; ++block) {
+        std::fill(buses.begin(), buses.end(), 0.0f);
+        factory->step(algorithm, buses.data(), kFrames / 4);
+    }
+    for (int block = 0; block < 180; ++block) {
+        std::fill(buses.begin(), buses.end(), 0.0f);
+        if (block % 12 == 0) buses[0] = 1.0f;
+        factory->step(algorithm, buses.data(), kFrames / 4);
+        if (buses[15 * kFrames] != 0.0f) {
+            return fail("top-range Transient Threshold did not mute Output Transient");
+        }
+    }
+
+    // Restore the permissive end of the same control and prove Output
+    // Transient resumes normal 0/5 V behavior without changing its assignment.
+    values[threshold] = 0;
+    bool sawRestoredOutputTransient = false;
+    for (int block = 0; block < 360; ++block) {
+        std::fill(buses.begin(), buses.end(), 0.0f);
+        if (block % 12 == 0) buses[0] = 1.0f;
+        factory->step(algorithm, buses.data(), kFrames / 4);
+        const float outputGate = buses[15 * kFrames];
+        if (outputGate != 0.0f && outputGate != 5.0f) {
+            return fail("restored Output Transient left its assigned gate range");
+        }
+        sawRestoredOutputTransient =
+            sawRestoredOutputTransient || outputGate == 5.0f;
+    }
+    if (!sawRestoredOutputTransient) {
+        return fail("Output Transient did not resume on its assigned CV bus");
+    }
+
     // Selecting 0 disconnects every assignment immediately and leaves each
     // previously selected physical/auxiliary bus untouched.
     for (int parameter : analysisOutputs) values[parameter] = 0;

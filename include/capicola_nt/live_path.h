@@ -71,6 +71,7 @@ public:
 
     void setTransientThreshold(float threshold) {
         for (auto& channel : channels_) channel.SetTransientThreshold(threshold);
+        outputDetector_.SetThreshold(threshold);
     }
 
     void setGrainSize(int keyframes) {
