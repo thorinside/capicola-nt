@@ -621,7 +621,13 @@ void parameterChanged(_NT_algorithm* base, int parameter) {
         }
         case kParamSample:
             if (!refreshCatalog(algorithm)) {
-                loadSelectedSample(algorithm, true);
+                // Preset restoration can notify Source, Folder, and Sample in
+                // sequence after all values are already present in v[]. The
+                // Source callback may therefore have loaded this exact file.
+                // Deduplicate ordinary host notifications; the sample
+                // selector's explicit LOAD action retains its forced-reload
+                // path below.
+                loadSelectedSample(algorithm);
             }
             break;
         case kParamPitch:

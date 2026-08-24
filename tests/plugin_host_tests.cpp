@@ -384,13 +384,13 @@ int main() {
         restoredEnergy += std::fabs(restoredBuses[12 * kFrames + i]) +
                           std::fabs(restoredBuses[13 * kFrames + i]);
     }
-    if (gStreamOpenCalls != opensBeforePresetRestore + 2 ||
+    if (gStreamOpenCalls != opensBeforePresetRestore + 1 ||
         gOpenedFolder != 0 || gOpenedSample != 1 ||
         restoredEnergy == 0.0 || restoredValues[source] != 1 ||
         gFolderInfoCalls != folderCallsBeforeRestoredStep ||
         gFileInfoCalls != fileCallsBeforeRestoredStep ||
         gParameterDefinitionUpdates != definitionUpdatesBeforeRestoredStep) {
-        return fail("valid host-persisted sample reference was not restored");
+        return fail("preset restore did not load its sample exactly once");
     }
     gAlgorithm = algorithm;
 
@@ -711,6 +711,13 @@ int main() {
         gFileInfoCalls != fileCallsBeforeSampleTitle) {
         return fail("successful sample callback did not title the playing sample");
     }
+    auto pressSampleLoad = [&]() {
+        for (int press = 0; press < 3; ++press) {
+            _NT_uiData loadUi{};
+            loadUi.controls = kNT_encoderButtonL;
+            factory->customUi(algorithm, loadUi);
+        }
+    };
 
     // A second selection made while a read is still active supersedes the
     // first one. The persistent request is reused only after the first
@@ -742,27 +749,27 @@ int main() {
     }
 
     // A host read that starts but reports failure must never expose partially
-    // written buffer contents. A later explicit confirmation can recover.
+    // written buffer contents. A later explicit LOAD action can recover.
     gSampleReadCallbackSucceeds = false;
-    factory->parameterChanged(algorithm, sample);
+    pressSampleLoad();
     gDrawnText.clear();
     factory->draw(algorithm);
     if (!drawnTextContains("SAMPLE WAIT")) {
         return fail("failed sample callback did not leave Sample mode waiting");
     }
     gSampleReadCallbackSucceeds = true;
-    factory->parameterChanged(algorithm, sample);
+    pressSampleLoad();
 
     // Drifters' fixed-memory contract is retained: longer files are truncated
     // to 32 seconds at the 48 kHz design baseline rather than allocating at
     // selection time or reading beyond the construction-time DRAM buffer.
     gSampleFrameCount = 48000U * 40U;
-    factory->parameterChanged(algorithm, sample);
+    pressSampleLoad();
     if (gLastRequestedFrames != 48000U * 32U) {
         return fail("sample read exceeded the fixed 32-second DRAM buffer");
     }
     gSampleFrameCount = 48000U;
-    factory->parameterChanged(algorithm, sample);
+    pressSampleLoad();
 
     // All five audited secondary controls must alter their intended linked
     // Capicola/feedback path while the selected sample is the sole source.
@@ -777,7 +784,7 @@ int main() {
         values[driveCharacter] = characterValue;
         values[parameter] = value;
         factory->parameterChanged(algorithm, parameter);
-        factory->parameterChanged(algorithm, sample);
+        pressSampleLoad();
         double signature = 0.0;
         for (int block = 0; block < 360; ++block) {
             factory->step(algorithm, buses.data(), kFrames / 4);
@@ -812,7 +819,7 @@ int main() {
     // Restore audited defaults before continuing the source-isolation checks.
     for (int control : secondaryControls) values[control] = algorithm->parameters[control].def;
     values[feedback] = algorithm->parameters[feedback].def;
-    factory->parameterChanged(algorithm, sample);
+    pressSampleLoad();
 
     // Simulate the host's ordinary parameter-to-CV mapping by replacing the
     // effective Mix value in v[] between audio callbacks. Mapping is host-owned,
@@ -909,7 +916,7 @@ int main() {
         }
     }
     values[mix] = 100;
-    factory->parameterChanged(algorithm, sample);
+    pressSampleLoad();
 
     // Sample mode has no transport trigger, so a loaded buffer loops without
     // any further host read. A deliberately tiny buffer proves multiple wraps
@@ -970,16 +977,16 @@ int main() {
     if (remountEnergy == 0.0) {
         return fail("loaded sample stopped when SD state changed during playback");
     }
-    factory->parameterChanged(algorithm, sample);
+    pressSampleLoad();
     factory->step(algorithm, buses.data(), kFrames / 4);
     if (gStreamOpenCalls != opensBeforeRemount + 1 ||
         gStreamRenderCalls != rendersBeforeRemount ||
         gOpenedFolder != 1 || gOpenedSample != 0) {
-        return fail("explicit Sample confirmation did not recover after remount");
+        return fail("explicit sample LOAD did not recover after remount");
     }
 
     // Missing or moved catalogue entry: the saved folder index is no longer
-    // present. Explicit confirmation performs no invalid lookup/open and Sample
+    // present. Explicit LOAD performs no invalid lookup/open and Sample
     // mode remains selected.
     gCardMounted = false;
     factory->step(algorithm, buses.data(), kFrames / 4);
@@ -988,7 +995,7 @@ int main() {
     const uint32_t filesBeforeMissing = gFileInfoCalls;
     gCardMounted = true;
     factory->step(algorithm, buses.data(), kFrames / 4);
-    factory->parameterChanged(algorithm, sample);
+    pressSampleLoad();
     factory->step(algorithm, buses.data(), kFrames / 4);
     if (values[source] != 1 || gStreamOpenCalls != opensBeforeMissing ||
         gFileInfoCalls != filesBeforeMissing || gInvalidCatalogLookup) {

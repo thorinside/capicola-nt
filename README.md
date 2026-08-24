@@ -110,9 +110,9 @@ arbitrary paths itself.
 
 Samples loop continuously, forward, from the beginning. Changing Folder loads
 the current valid Sample in that folder; if the old Sample number is outside the
-new folder's range, the NT value is moved into range before loading. Confirm the
-**Sample** parameter again to reload and restart it. Mono samples feed both
-channels; stereo samples keep their left/right order. Capicola loads at most
+new folder's range, the NT value is moved into range before loading. To reload
+and restart the same file, reopen the selector and press **LOAD**. Mono samples
+feed both channels; stereo samples keep their left/right order. Capicola loads at most
 1,536,000 frames from the start of a file (32 seconds at 48 kHz). Use a
 loop-prepared file when the wrap point needs to be seamless; Capicola does not
 edit loop points or add a boundary crossfade.
@@ -122,9 +122,9 @@ Keep the SD sample catalogue stable when a preset depends on a sample. If the
 saved catalogue indices are invalid or the selected file is unreadable,
 Capicola remains in Sample mode and outputs silence—it does not switch to Live.
 Removing the SD card after loading does not interrupt the current in-memory
-playback. After inserting or remounting the card, confirm **Sample** again
-before another load. Capicola does not perform catalogue discovery or file
-reads in the audio callback.
+playback. After inserting or remounting the card, reopen the sample selector
+and press **LOAD** before another load. Capicola does not perform catalogue
+discovery or file reads in the audio callback.
 
 Capicola does not add reverse playback, scrubbing, regions, chopping,
 polyphony, recording, or live/sample mixing.
@@ -199,7 +199,7 @@ analysis signal and an audio output—to the same bus.
 - **The display stays at LOADING:** wait for the file read to finish. If it
   does not finish, reinsert the SD card and select the sample again.
 - **The display says SAMPLE WAIT:** make sure the SD card is mounted and the
-  selected folder/sample still exists, then confirm Sample again.
+  selected folder/sample still exists, then reopen the selector and press LOAD.
 - **The level keeps increasing:** set Feedback below 100%, preferably to 0%
   while diagnosing the patch.
 - **CV is not changing a control:** use the NT parameter-mapping interface;
