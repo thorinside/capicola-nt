@@ -138,8 +138,8 @@
     "classification": "NT wrapper source adapter, not an upstream sampler capability",
     "acceptedCatalog": "Only files enumerated by the pinned NT sample-folder APIs",
     "metadata": "uint32 frame count and sample rate; mono or stereo; 8-, 16-, 24-bit PCM or 32-bit float as represented by _NT_wavInfo",
-    "conversion": "The pinned API reader converts the requested channel count and bit depth. The wrapper advances through the loaded buffer at file sample rate / host sample rate with linear interpolation.",
-    "wrapperLimits": "At most the first 1,536,000 frames are loaded into fixed construction-time memory (32 seconds at 48 kHz) and loop while Sample mode is active because there is no transport trigger. Entering Sample or changing Folder loads the current valid selection; Folder changes synchronize Sample to the visible legal range. Mono is duplicated to the stereo engine and stereo preserves channel order. Unsupported or unreadable files remain host errors.",
+    "conversion": "The pinned streaming API supplies stereo float frames at the wrapper's file sample rate / host sample rate speed; mono is duplicated by the host stream and stereo preserves channel order.",
+    "wrapperLimits": "The full host-supported file streams through API-sized per-instance state and buffer memory rather than a full-file allocation. It loops while Sample mode is active because there is no transport trigger. Entering Sample or changing Folder opens the current valid selection; Folder changes synchronize Sample to the visible legal range. Loop recovery is limited to one reopen per audio block, and an unexpected short render drops the remaining frames instead of performing unbounded SD work. Unsupported or unreadable files remain host errors.",
     "notSamplerFeatures": ["recording", "reverse", "scrubbing", "start/end editing", "loop-point editing", "loop-boundary crossfade", "slicing/chopping", "polyphonic playback", "live/sample mixing", "silent sample substitution"]
   },
   "excludedUpstreamSurface": [

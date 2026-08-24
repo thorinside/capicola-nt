@@ -86,34 +86,35 @@ bank and an ALT bank:
 The three visible control names show which pot bank is active. The bottom line
 shows only the current Mix.
 
-The title line shows the source state:
+The title line always keeps the plug-in identity visible:
 
 - **CAPICOLA LIVE** — the selected input buses are being processed.
-- **LOADING _name_** — the NT is reading that sample into memory.
-- **_sample name_** — that loaded sample is looping.
-- **SAMPLE WAIT** — Sample mode is selected, but no sample is available.
+- **CAPICOLA _name_** — that sample is streaming and looping. The display
+  removes the final file extension and shortens names longer than 12 characters
+  with a middle ellipsis.
+- **CAPICOLA WAIT** — Sample mode is selected, but no stream is available.
 
-## Load and play a sample
+## Select and play a sample
 
 Capicola uses the sample catalogue provided by the disting NT. It does not scan
 arbitrary paths itself.
 
 1. Put the sample in a folder that appears in the NT sample catalogue.
 2. Turn the left encoder until the source changes to **Sample**. Capicola
-   immediately loads the currently selected valid folder/sample.
+   immediately opens the currently selected valid folder/sample as a stream.
 3. To choose something else, press the left encoder. On **SELECT FOLDER**,
    turn to choose a folder and press to continue.
-4. On **SELECT SAMPLE**, turn to choose a sample and press to load it.
-5. The performance screen returns. **LOADING** and the sample name are shown
-   while the file is read. The title becomes the sample name when playback
-   begins. **SAMPLE WAIT** means that the selection could not be loaded.
+4. On **SELECT SAMPLE**, turn to choose a sample and press **LOAD** to start it.
+5. The performance screen returns immediately. Its title keeps **CAPICOLA**
+   followed by the compact sample name. **CAPICOLA WAIT** means that the stream
+   could not be opened.
 
-Samples loop continuously, forward, from the beginning. Changing Folder loads
+Samples loop continuously, forward, from the beginning. Changing Folder opens
 the current valid Sample in that folder; if the old Sample number is outside the
-new folder's range, the NT value is moved into range before loading. To reload
+new folder's range, the NT value is moved into range before opening. To reload
 and restart the same file, reopen the selector and press **LOAD**. Mono samples
-feed both channels; stereo samples keep their left/right order. Capicola loads at most
-1,536,000 frames from the start of a file (32 seconds at 48 kHz). Use a
+feed both channels; stereo samples keep their left/right order. Capicola streams
+the full file instead of copying it into a large memory buffer. Use a
 loop-prepared file when the wrap point needs to be seamless; Capicola does not
 edit loop points or add a boundary crossfade.
 
@@ -121,10 +122,12 @@ The Source, Folder, and Sample selections are ordinary NT preset parameters.
 Keep the SD sample catalogue stable when a preset depends on a sample. If the
 saved catalogue indices are invalid or the selected file is unreadable,
 Capicola remains in Sample mode and outputs silence—it does not switch to Live.
-Removing the SD card after loading does not interrupt the current in-memory
-playback. After inserting or remounting the card, reopen the sample selector
-and press **LOAD** before another load. Capicola does not perform catalogue
-discovery or file reads in the audio callback.
+The SD card must remain available during playback. A temporary stream underrun
+drops or fades the affected audio block rather than crashing. After inserting
+or remounting the card, reopen the sample selector and press **LOAD** if the
+stream does not resume. The audio callback performs no catalogue scans or
+parameter-definition changes; its only SD operation is the NT's bounded stream
+renderer and a single reopen at a loop boundary.
 
 Capicola does not add reverse playback, scrubbing, regions, chopping,
 polyphony, recording, or live/sample mixing.
@@ -196,9 +199,7 @@ analysis signal and an audio output—to the same bus.
   to 100%, Stretch to 0%, Feedback to 0%, and use Replace on dedicated outputs.
 - **A mono patch is only on the left:** set Right input to `None` to normalize
   Left input to both channels.
-- **The display stays at LOADING:** wait for the file read to finish. If it
-  does not finish, reinsert the SD card and select the sample again.
-- **The display says SAMPLE WAIT:** make sure the SD card is mounted and the
+- **The display says CAPICOLA WAIT:** make sure the SD card is mounted and the
   selected folder/sample still exists, then reopen the selector and press LOAD.
 - **The level keeps increasing:** set Feedback below 100%, preferably to 0%
   while diagnosing the patch.

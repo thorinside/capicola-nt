@@ -18,16 +18,14 @@ namespace {
 // This ring supports the audited maximum 4096-keyframe grain while retaining
 // additional source history. The two rings live in host-provided DRAM.
 constexpr int kRingFrames = 16384;
-constexpr uint32_t kMaxLoadedSampleFrames = 48000U * 32U;
 constexpr float kSamplePlaybackGain = 8.0f;
 using SourceProcessor = capicola_nt::CapicolaStereoLivePath<kRingFrames>;
 
-struct SampleLoadSpec {
+struct SampleStreamSpec {
     uint32_t folder;
     uint32_t sample;
     uint32_t frames;
     uint32_t sampleRate;
-    uint32_t generation;
     char name[kNT_parameterStringSize];
 };
 
@@ -166,29 +164,27 @@ static const _NT_parameterPages kParameterPages = {
 struct Algorithm : public _NT_algorithm {
     _NT_parameter params[kNumParameters];
     SourceProcessor* processor;
-    _NT_frame* loadedSample;
+    _NT_stream stream;
+    void* streamBuffer;
+    _NT_frame* streamFrames;
     float* scratchLeft;
     float* scratchRight;
     float* sampleLeft;
     float* sampleRight;
-    _NT_wavRequest sampleRequest;
-    SampleLoadSpec loadingSample;
-    SampleLoadSpec queuedSample;
-    uint32_t selectionGeneration;
-    uint32_t loadedSampleFrames;
-    uint32_t loadedSampleIndex;
-    float loadedSampleFraction;
+    SampleStreamSpec streamedSample;
+    uint32_t streamSourceFrame;
+    float streamSourceFraction;
     float sampleSpeed;
-    char loadedSampleName[kNT_parameterStringSize];
+    char streamedSampleName[kNT_parameterStringSize];
     bool cardMounted;
     bool sampleReady;
-    bool sampleLoading;
     bool samplePlaying;
-    bool queuedSampleLoad;
     bool synchronizingSampleParameter;
     SourceMode activeSource;
     UiView uiView;
     bool alternateControls;
+    int16_t pendingUiValues[kNumParameters];
+    uint32_t pendingUiValueMask;
     int16_t appliedControls[ARRAY_SIZE(kPerformanceParameters)];
     bool processingControlsApplied;
     bool processorFaulted;
@@ -202,10 +198,12 @@ void calculateRequirements(_NT_algorithmRequirements& requirements,
     requirements.sram = sizeof(Algorithm) + alignof(Algorithm) - 1U;
     requirements.dram = alignof(SourceProcessor) - 1U +
                         sizeof(SourceProcessor) +
-                        alignof(float) - 1U +
-                        kMaxLoadedSampleFrames * sizeof(_NT_frame) +
+                        2U * (alignof(float) - 1U) +
+                        NT_globals.streamBufferSizeBytes +
+                        NT_globals.maxFramesPerStep * sizeof(_NT_frame) +
                         4U * NT_globals.maxFramesPerStep * sizeof(float);
-    requirements.dtc = 0;
+    requirements.dtc = alignof(uint32_t) - 1U +
+                       NT_globals.streamSizeBytes;
     requirements.itc = 0;
 }
 
@@ -239,31 +237,30 @@ _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& memory,
     resetProcessor(algorithm);
     cursor += sizeof(SourceProcessor);
     cursor = alignPointer(cursor, alignof(float));
-    algorithm->loadedSample = reinterpret_cast<_NT_frame*>(cursor);
-    cursor += kMaxLoadedSampleFrames * sizeof(_NT_frame);
+    algorithm->streamBuffer = cursor;
+    cursor += NT_globals.streamBufferSizeBytes;
+    cursor = alignPointer(cursor, alignof(float));
+    algorithm->streamFrames = reinterpret_cast<_NT_frame*>(cursor);
+    cursor += NT_globals.maxFramesPerStep * sizeof(_NT_frame);
     algorithm->scratchLeft = reinterpret_cast<float*>(cursor);
     algorithm->scratchRight = algorithm->scratchLeft + NT_globals.maxFramesPerStep;
     algorithm->sampleLeft = algorithm->scratchRight + NT_globals.maxFramesPerStep;
     algorithm->sampleRight = algorithm->sampleLeft + NT_globals.maxFramesPerStep;
+    algorithm->stream = alignPointer(memory.dtc, alignof(uint32_t));
 
-    algorithm->sampleRequest = {};
-    algorithm->loadingSample = {};
-    algorithm->queuedSample = {};
-    algorithm->selectionGeneration = 0;
-    algorithm->loadedSampleFrames = 0;
-    algorithm->loadedSampleIndex = 0;
-    algorithm->loadedSampleFraction = 0.0f;
+    algorithm->streamedSample = {};
+    algorithm->streamSourceFrame = 0U;
+    algorithm->streamSourceFraction = 0.0f;
     algorithm->sampleSpeed = 1.0f;
-    algorithm->loadedSampleName[0] = '\0';
+    algorithm->streamedSampleName[0] = '\0';
     algorithm->cardMounted = NT_isSdCardMounted();
     algorithm->sampleReady = false;
-    algorithm->sampleLoading = false;
     algorithm->samplePlaying = false;
-    algorithm->queuedSampleLoad = false;
     algorithm->synchronizingSampleParameter = false;
     algorithm->activeSource = kSourceLive;
     algorithm->uiView = kUiPerformance;
     algorithm->alternateControls = false;
+    algorithm->pendingUiValueMask = 0U;
 
     const uint32_t folderCount = algorithm->cardMounted
         ? NT_getNumSampleFolders() : 0;
@@ -418,75 +415,41 @@ bool updateSampleRange(Algorithm* algorithm) {
 }
 
 void invalidateSamplePlayback(Algorithm* algorithm) {
-    ++algorithm->selectionGeneration;
-    algorithm->loadedSampleFrames = 0;
-    algorithm->loadedSampleIndex = 0;
-    algorithm->loadedSampleFraction = 0.0f;
-    algorithm->loadedSampleName[0] = '\0';
+    algorithm->streamSourceFrame = 0U;
+    algorithm->streamSourceFraction = 0.0f;
+    algorithm->streamedSampleName[0] = '\0';
     algorithm->sampleReady = false;
     algorithm->samplePlaying = false;
-    algorithm->queuedSampleLoad = false;
 }
 
-bool startSampleLoad(Algorithm* algorithm, const SampleLoadSpec& spec);
-
-void sampleLoadCallback(void* callbackData, bool success) {
-    Algorithm* algorithm = static_cast<Algorithm*>(callbackData);
-    algorithm->sampleLoading = false;
-
-    if (algorithm->queuedSampleLoad) {
-        const SampleLoadSpec queued = algorithm->queuedSample;
-        algorithm->queuedSampleLoad = false;
-        if (queued.generation == algorithm->selectionGeneration &&
-            algorithm->activeSource == kSourceSample &&
-            algorithm->cardMounted) {
-            startSampleLoad(algorithm, queued);
-        }
-        return;
+bool openSampleStream(Algorithm* algorithm, const SampleStreamSpec& spec) {
+    const _NT_streamOpenData data = {
+        .streamBuffer = algorithm->streamBuffer,
+        .folder = spec.folder,
+        .sample = spec.sample,
+        .velocity = 1.0f,
+        .startOffset = 0,
+        .reverse = false,
+        .rrMode = kNT_RRModeSequential,
+    };
+    if (!NT_streamOpen(algorithm->stream, data)) {
+        algorithm->sampleReady = false;
+        algorithm->samplePlaying = false;
+        return false;
     }
-
-    const SampleLoadSpec loaded = algorithm->loadingSample;
-    if (!success || loaded.generation != algorithm->selectionGeneration ||
-        algorithm->activeSource != kSourceSample || !algorithm->cardMounted ||
-        loaded.frames == 0 || loaded.sampleRate == 0 ||
-        NT_globals.sampleRate == 0) {
-        return;
-    }
-
-    algorithm->loadedSampleFrames = loaded.frames;
-    algorithm->loadedSampleIndex = 0;
-    algorithm->loadedSampleFraction = 0.0f;
-    algorithm->sampleSpeed = static_cast<float>(loaded.sampleRate) /
+    algorithm->streamedSample = spec;
+    algorithm->streamSourceFrame = 0U;
+    algorithm->streamSourceFraction = 0.0f;
+    algorithm->sampleSpeed = static_cast<float>(spec.sampleRate) /
                              static_cast<float>(NT_globals.sampleRate);
     algorithm->sampleReady = std::isfinite(algorithm->sampleSpeed) &&
                              algorithm->sampleSpeed > 0.0f;
     algorithm->samplePlaying = algorithm->sampleReady;
-    std::strncpy(algorithm->loadedSampleName, loaded.name,
-                 sizeof(algorithm->loadedSampleName) - 1U);
-    algorithm->loadedSampleName[sizeof(algorithm->loadedSampleName) - 1U] = '\0';
-}
-
-bool startSampleLoad(Algorithm* algorithm, const SampleLoadSpec& spec) {
-    algorithm->loadingSample = spec;
-    algorithm->sampleRequest.folder = spec.folder;
-    algorithm->sampleRequest.sample = spec.sample;
-    algorithm->sampleRequest.dst = algorithm->loadedSample;
-    algorithm->sampleRequest.numFrames = spec.frames;
-    algorithm->sampleRequest.startOffset = 0;
-    algorithm->sampleRequest.channels = kNT_WavStereo;
-    algorithm->sampleRequest.bits = kNT_WavBits32;
-    algorithm->sampleRequest.progress = kNT_WavProgress;
-    algorithm->sampleRequest.callback = sampleLoadCallback;
-    algorithm->sampleRequest.callbackData = algorithm;
-
-    // Set this before entering the host so even a synchronous test callback
-    // cannot leave the state stuck in "loading" after it returns.
-    algorithm->sampleLoading = true;
-    if (!NT_readSampleFrames(algorithm->sampleRequest)) {
-        algorithm->sampleLoading = false;
-        return false;
-    }
-    return true;
+    std::strncpy(algorithm->streamedSampleName, spec.name,
+                 sizeof(algorithm->streamedSampleName) - 1U);
+    algorithm->streamedSampleName[
+        sizeof(algorithm->streamedSampleName) - 1U] = '\0';
+    return algorithm->sampleReady;
 }
 
 // Catalogue discovery and parameter-definition updates may touch the SD card
@@ -515,7 +478,7 @@ bool refreshCatalog(Algorithm* algorithm) {
     return false;
 }
 
-void loadSelectedSample(Algorithm* algorithm, bool forceReload = false) {
+void openSelectedSample(Algorithm* algorithm, bool forceReload = false) {
     if (!algorithm->cardMounted || algorithm->activeSource != kSourceSample) {
         return;
     }
@@ -546,37 +509,26 @@ void loadSelectedSample(Algorithm* algorithm, bool forceReload = false) {
         return;
     }
 
-    const bool sameActiveRequest =
-        algorithm->loadingSample.folder == folder &&
-        algorithm->loadingSample.sample == sample &&
-        algorithm->loadingSample.generation == algorithm->selectionGeneration;
-    if (!forceReload && sameActiveRequest &&
-        (algorithm->sampleLoading || algorithm->sampleReady)) {
+    const bool sameActiveStream =
+        algorithm->streamedSample.folder == folder &&
+        algorithm->streamedSample.sample == sample;
+    if (!forceReload && sameActiveStream && algorithm->sampleReady) {
         return;
     }
 
-    // A new or failed selection replaces the previous sample immediately;
-    // never render history retained from another file while the asynchronous
-    // read is in flight.
+    // A new or failed selection replaces the previous stream immediately.
     invalidateSamplePlayback(algorithm);
     resetProcessor(algorithm);
 
-    SampleLoadSpec spec{};
+    SampleStreamSpec spec{};
     spec.folder = folder;
     spec.sample = sample;
-    spec.frames = info.numFrames > kMaxLoadedSampleFrames
-        ? kMaxLoadedSampleFrames : info.numFrames;
+    spec.frames = info.numFrames;
     spec.sampleRate = info.sampleRate;
-    spec.generation = algorithm->selectionGeneration;
     std::strncpy(spec.name, info.name == nullptr ? "Sample" : info.name,
                  sizeof(spec.name) - 1U);
     spec.name[sizeof(spec.name) - 1U] = '\0';
-    if (algorithm->sampleLoading) {
-        algorithm->queuedSample = spec;
-        algorithm->queuedSampleLoad = true;
-        return;
-    }
-    startSampleLoad(algorithm, spec);
+    openSampleStream(algorithm, spec);
 }
 
 void selectSource(Algorithm* algorithm, SourceMode source) {
@@ -592,6 +544,10 @@ void selectSource(Algorithm* algorithm, SourceMode source) {
 
 void parameterChanged(_NT_algorithm* base, int parameter) {
     Algorithm* algorithm = static_cast<Algorithm*>(base);
+    if (parameter >= 0 && parameter < kNumParameters) {
+        algorithm->pendingUiValueMask &=
+            ~(uint32_t{1} << static_cast<uint32_t>(parameter));
+    }
     switch (parameter) {
         case kParamSource:
         {
@@ -600,19 +556,19 @@ void parameterChanged(_NT_algorithm* base, int parameter) {
                     ? kSourceSample : kSourceLive;
             selectSource(algorithm, source);
             if (source == kSourceSample) {
-                const bool sampleCallbackLoaded = refreshCatalog(algorithm);
-                if (!sampleCallbackLoaded) {
-                    loadSelectedSample(algorithm);
+                const bool sampleValueSynchronized = refreshCatalog(algorithm);
+                if (!sampleValueSynchronized) {
+                    openSelectedSample(algorithm);
                 }
             }
             break;
         }
         case kParamFolder:
         {
-            const bool sampleCallbackLoaded = refreshCatalog(algorithm);
+            const bool sampleValueSynchronized = refreshCatalog(algorithm);
             if (algorithm->activeSource == kSourceSample &&
-                !sampleCallbackLoaded) {
-                loadSelectedSample(algorithm);
+                !sampleValueSynchronized) {
+                openSelectedSample(algorithm);
             } else if (algorithm->activeSource != kSourceSample) {
                 invalidateSamplePlayback(algorithm);
                 resetProcessor(algorithm);
@@ -627,7 +583,7 @@ void parameterChanged(_NT_algorithm* base, int parameter) {
                 // Deduplicate ordinary host notifications; the sample
                 // selector's explicit LOAD action retains its forced-reload
                 // path below.
-                loadSelectedSample(algorithm);
+                openSelectedSample(algorithm);
             }
             break;
         case kParamPitch:
@@ -740,67 +696,78 @@ void writeAnalysisCv(float* busFrames,
     }
 }
 
-uint32_t renderLoadedSample(Algorithm* algorithm, int frames) {
+uint32_t renderStreamedSample(Algorithm* algorithm, int frames) {
     std::memset(algorithm->sampleLeft, 0,
                 static_cast<std::size_t>(frames) * sizeof(float));
     std::memset(algorithm->sampleRight, 0,
                 static_cast<std::size_t>(frames) * sizeof(float));
 
     if (!algorithm->sampleReady || !algorithm->samplePlaying ||
-        algorithm->loadedSampleFrames == 0 ||
-        algorithm->loadedSampleIndex >= algorithm->loadedSampleFrames ||
-        !std::isfinite(algorithm->loadedSampleFraction) ||
+        algorithm->streamedSample.frames == 0 ||
+        algorithm->streamSourceFrame > algorithm->streamedSample.frames ||
+        !std::isfinite(algorithm->streamSourceFraction) ||
         !std::isfinite(algorithm->sampleSpeed) ||
-        algorithm->loadedSampleFraction < 0.0f ||
-        algorithm->loadedSampleFraction >= 1.0f ||
+        algorithm->streamSourceFraction < 0.0f ||
+        algorithm->streamSourceFraction >= 1.0f ||
         algorithm->sampleSpeed <= 0.0f) {
         algorithm->samplePlaying = false;
         return 0;
     }
 
-    uint32_t index = algorithm->loadedSampleIndex;
-    float fraction = algorithm->loadedSampleFraction;
-    uint32_t rendered = 0;
-    for (int i = 0;
-         i < frames && index < algorithm->loadedSampleFrames;
-         ++i) {
-        const uint32_t next = index + 1U < algorithm->loadedSampleFrames
-            ? index + 1U : 0U;
-        const float left = algorithm->loadedSample[index][0] + fraction *
-            (algorithm->loadedSample[next][0] -
-             algorithm->loadedSample[index][0]);
-        const float right = algorithm->loadedSample[index][1] + fraction *
-            (algorithm->loadedSample[next][1] -
-             algorithm->loadedSample[index][1]);
-        algorithm->sampleLeft[i] = std::isfinite(left)
-            ? left * kSamplePlaybackGain : 0.0f;
-        algorithm->sampleRight[i] = std::isfinite(right)
-            ? right * kSamplePlaybackGain : 0.0f;
-        ++rendered;
+    uint32_t total = 0U;
+    uint32_t restarts = 0U;
+    while (total < static_cast<uint32_t>(frames)) {
+        if (algorithm->streamSourceFrame >= algorithm->streamedSample.frames) {
+            if (restarts != 0U) break;
+            const SampleStreamSpec loop = algorithm->streamedSample;
+            if (!openSampleStream(algorithm, loop)) break;
+            ++restarts;
+        }
 
-        const float advance = fraction + algorithm->sampleSpeed;
+        const uint32_t requested = static_cast<uint32_t>(frames) - total;
+        const uint32_t sourceFrameBefore = algorithm->streamSourceFrame;
+        const float sourceFractionBefore = algorithm->streamSourceFraction;
+        const uint32_t rendered = NT_streamRender(
+            algorithm->stream, algorithm->streamFrames + total,
+            requested, algorithm->sampleSpeed);
+        const uint32_t bounded = rendered > requested ? requested : rendered;
+        for (uint32_t i = 0U; i < bounded; ++i) {
+            const float left = algorithm->streamFrames[total + i][0];
+            const float right = algorithm->streamFrames[total + i][1];
+            algorithm->sampleLeft[total + i] = std::isfinite(left)
+                ? left * kSamplePlaybackGain : 0.0f;
+            algorithm->sampleRight[total + i] = std::isfinite(right)
+                ? right * kSamplePlaybackGain : 0.0f;
+        }
+        total += bounded;
+        const float advance = algorithm->streamSourceFraction +
+            static_cast<float>(bounded) * algorithm->sampleSpeed;
         if (!std::isfinite(advance) ||
             advance >= static_cast<float>(UINT32_MAX)) {
             algorithm->samplePlaying = false;
-            fraction = 0.0f;
             break;
         }
         const uint32_t wholeFrames = static_cast<uint32_t>(advance);
-        fraction = advance - static_cast<float>(wholeFrames);
-        const uint32_t remaining = algorithm->loadedSampleFrames - index;
-        if (wholeFrames < remaining) {
-            index += wholeFrames;
-        } else {
-            const uint32_t afterEnd = wholeFrames - remaining;
-            index = afterEnd < algorithm->loadedSampleFrames
-                ? afterEnd
-                : afterEnd % algorithm->loadedSampleFrames;
-        }
-    }
+        algorithm->streamSourceFraction =
+            advance - static_cast<float>(wholeFrames);
+        const uint32_t remaining = algorithm->streamedSample.frames -
+            algorithm->streamSourceFrame;
+        algorithm->streamSourceFrame += wholeFrames < remaining
+            ? wholeFrames : remaining;
 
-    algorithm->loadedSampleIndex = index;
-    algorithm->loadedSampleFraction = fraction;
-    return rendered;
+        if (bounded == requested) break;
+        const float requestedAdvance = sourceFractionBefore +
+            static_cast<float>(requested) * algorithm->sampleSpeed;
+        const bool expectedEnd = std::isfinite(requestedAdvance) &&
+            requestedAdvance >= static_cast<float>(
+                algorithm->streamedSample.frames - sourceFrameBefore);
+        if (!expectedEnd || restarts != 0U) break;
+
+        const SampleStreamSpec loop = algorithm->streamedSample;
+        if (!openSampleStream(algorithm, loop)) break;
+        ++restarts;
+    }
+    return total;
 }
 
 void step(_NT_algorithm* base, float* busFrames, int numFramesBy4) {
@@ -836,7 +803,7 @@ void step(_NT_algorithm* base, float* busFrames, int numFramesBy4) {
         left = algorithm->sampleLeft;
         right = algorithm->sampleRight;
     } else {
-        const uint32_t count = renderLoadedSample(algorithm, frames);
+        const uint32_t count = renderStreamedSample(algorithm, frames);
         sourceAvailable = count != 0;
         left = algorithm->sampleLeft;
         right = algorithm->sampleRight;
@@ -925,9 +892,65 @@ void copyLiteral(char* destination, std::size_t size, const char (&source)[N]) {
     if (count == size) destination[size - 1U] = '\0';
 }
 
+void compactSampleName(const char* filename, char* destination,
+                       std::size_t size) {
+    constexpr std::size_t kVisibleCharacters = 12U;
+    constexpr std::size_t kLeadingCharacters = 5U;
+    constexpr std::size_t kTrailingCharacters = 4U;
+    if (size == 0U) return;
+    destination[0] = '\0';
+    if (filename == nullptr || filename[0] == '\0') {
+        copyLiteral(destination, size, "SAMPLE");
+        return;
+    }
+
+    const std::size_t filenameLength = std::strlen(filename);
+    std::size_t stemLength = filenameLength;
+    for (std::size_t i = filenameLength; i > 0U; --i) {
+        if (filename[i - 1U] == '.') {
+            if (i > 1U) stemLength = i - 1U;
+            break;
+        }
+    }
+
+    char compact[kVisibleCharacters + 1U] = {};
+    if (stemLength <= kVisibleCharacters) {
+        std::memcpy(compact, filename, stemLength);
+        compact[stemLength] = '\0';
+    } else {
+        std::memcpy(compact, filename, kLeadingCharacters);
+        compact[kLeadingCharacters] = '.';
+        compact[kLeadingCharacters + 1U] = '.';
+        compact[kLeadingCharacters + 2U] = '.';
+        std::memcpy(compact + kLeadingCharacters + 3U,
+                    filename + stemLength - kTrailingCharacters,
+                    kTrailingCharacters);
+        compact[kVisibleCharacters] = '\0';
+    }
+
+    const std::size_t compactLength = std::strlen(compact);
+    const std::size_t copyLength = compactLength < size - 1U
+        ? compactLength : size - 1U;
+    std::memcpy(destination, compact, copyLength);
+    destination[copyLength] = '\0';
+}
+
+void formatSampleTitle(char* text, std::size_t size, const char* filename) {
+    char sample[13] = {};
+    compactSampleName(filename, sample, sizeof(sample));
+    std::snprintf(text, size, "CAPICOLA  %s", sample);
+}
+
+int32_t displayedValue(const Algorithm* algorithm, int parameter) {
+    const uint32_t bit = uint32_t{1} << static_cast<uint32_t>(parameter);
+    return (algorithm->pendingUiValueMask & bit) != 0U
+        ? algorithm->pendingUiValues[parameter]
+        : algorithm->v[parameter];
+}
+
 void formatControlValue(const Algorithm* algorithm, int parameter,
                         char* text, std::size_t size) {
-    const long value = static_cast<long>(algorithm->v[parameter]);
+    const long value = static_cast<long>(displayedValue(algorithm, parameter));
     if (parameter == kParamPitch) {
         const long magnitude = value < 0 ? -value : value;
         std::snprintf(text, size, "%c%ld.%ld st",
@@ -966,17 +989,11 @@ bool draw(_NT_algorithm* base) {
     const bool sampleMode = algorithm->v[kParamSource] == kSourceSample;
     if (!sampleMode) {
         copyLiteral(text, sizeof(text), "CAPICOLA   LIVE");
-    } else if (algorithm->sampleLoading) {
-        const SampleLoadSpec& pending = algorithm->queuedSampleLoad
-            ? algorithm->queuedSample : algorithm->loadingSample;
-        std::snprintf(text, sizeof(text), "LOADING %.54s",
-                      pending.name[0] == '\0' ? "SAMPLE" : pending.name);
     } else if (algorithm->samplePlaying &&
-               algorithm->loadedSampleName[0] != '\0') {
-        std::strncpy(text, algorithm->loadedSampleName, sizeof(text) - 1U);
-        text[sizeof(text) - 1U] = '\0';
+               algorithm->streamedSampleName[0] != '\0') {
+        formatSampleTitle(text, sizeof(text), algorithm->streamedSampleName);
     } else {
-        copyLiteral(text, sizeof(text), "SAMPLE WAIT");
+        copyLiteral(text, sizeof(text), "CAPICOLA   WAIT");
     }
     NT_drawText(0, 10, text);
 
@@ -997,7 +1014,7 @@ bool draw(_NT_algorithm* base) {
     }
 
     std::snprintf(text, sizeof(text), "MIX %ld%%",
-                  static_cast<long>(algorithm->v[kParamMix]));
+                  static_cast<long>(displayedValue(algorithm, kParamMix)));
     NT_drawText(0, 60, text, 12);
     return true;
 }
@@ -1017,6 +1034,9 @@ void setFromUi(Algorithm* algorithm, int parameter, int value) {
     const _NT_parameter& definition = algorithm->params[parameter];
     if (value < definition.min) value = definition.min;
     if (value > definition.max) value = definition.max;
+    algorithm->pendingUiValues[parameter] = static_cast<int16_t>(value);
+    algorithm->pendingUiValueMask |=
+        uint32_t{1} << static_cast<uint32_t>(parameter);
     NT_setParameterFromUi(NT_algorithmIndex(algorithm),
                           parameter + NT_parameterOffset(), value);
 }
@@ -1035,7 +1055,7 @@ void customUi(_NT_algorithm* base, const _NT_uiData& data) {
             if (algorithm->uiView == kUiFolderSelection) {
                 algorithm->uiView = kUiSampleSelection;
             } else {
-                loadSelectedSample(algorithm, true);
+                openSelectedSample(algorithm, true);
                 algorithm->uiView = kUiPerformance;
             }
         }

@@ -26,36 +26,40 @@ Changing source resets the engine so history from the replaced source cannot
 sound afterward.
 
 Live mode reads the selected logical buses, with optional left-to-right mono
-normalization. Sample mode uses the API v13 folder catalogue and asynchronous
-WAV reader. It loads up to 1,536,000 frames from the exact selected catalogue
-entry into a fixed stereo float buffer, then loops that buffer forward. Entering
-Sample mode and changing Folder both initiate a valid selected load outside the
-audio callback. Folder changes also synchronize Sample into the new legal
-range through the callback-safe host setter. The source-rate/host-rate ratio
-advances a linearly interpolated playback cursor that wraps in constant bounded
-work. Both channels render to private scratch buffers before Add/Replace audio
-output writes. Four optional analysis signals replace their selected CV buses
-and default to `None`.
+normalization. Sample mode uses the API v13 folder catalogue and streaming API.
+Entering Sample mode and changing Folder open the exact valid selection outside
+the audio callback. Folder changes also synchronize Sample into the new legal
+range through the callback-safe host setter. `NT_streamRender()` converts and
+advances the source at the file-rate/host-rate ratio. At end of file, the wrapper
+performs at most one stream reopen per block; a short read that is not the
+expected boundary leaves the remainder silent for that block. Both channels
+render to private scratch buffers before Add/Replace audio output writes. Four
+optional analysis signals replace their selected CV buses and default to `None`.
 
-All persistent DSP, sample, request, and block storage comes from the memory
-supplied at construction; the audio path performs no heap allocation. Typed
+All persistent DSP, stream, and block storage comes from the memory supplied at
+construction; the audio path performs no heap allocation. The opaque stream
+state uses `NT_globals.streamSizeBytes`, and its host buffer uses
+`NT_globals.streamBufferSizeBytes`; no full-file buffer is reserved. Typed
 objects and scratch buffers are explicitly aligned within those byte
 allocations. Engine reset is constant-time with respect to the large sparse
 rings: it resets their live range and sentinel rather than clearing roughly half
 a megabyte of DRAM. The three persistent shaper tables are initialized directly
 in that storage; the ARM build rejects any function whose static stack
-requirement exceeds 1 KiB. The audio callback also performs no SD catalogue
-queries, parameter-definition updates, or file reads. A missing source block or
-non-finite DSP result ramps the last valid output to silence; catalogue refresh
-and sample recovery wait for a later parameter/UI event.
+requirement exceeds 1 KiB. The audio callback performs no SD catalogue queries
+or parameter-definition updates. Its only file operation is the bounded host
+stream render, plus one possible reopen at a loop boundary. A stream underrun,
+missing source block, or non-finite DSP result ramps or drops toward silence;
+catalogue refresh and explicit recovery wait for a parameter/UI event.
 
 The custom UI owns three pressable pots and two pressable encoders. Its two
 labelled pot banks and temporary folder/sample selector are documented in the
-[user guide](../README.md). The title prioritizes the loaded sample name; the
-footer contains only Mix, with analysis activity left to the optional CV
-outputs. Stretch retains the upstream taper but is rendered as a time factor or
-**FREEZE**. All twelve continuous processing controls remain ordinary host
-parameters on the Performance page.
+[user guide](../README.md). The title always retains **CAPICOLA** and follows it
+with a sample stem limited to 12 characters using a middle ellipsis. The footer
+contains only Mix, with analysis activity left to the optional CV outputs.
+Stretch retains the upstream taper but is rendered as a time factor or
+**FREEZE**. Pot-originated values are mirrored immediately for display while
+the host commits the parameter update. All twelve continuous processing
+controls remain ordinary host parameters on the Performance page.
 
 ## Pinned source and platform
 
@@ -115,7 +119,7 @@ unnecessarily technical:
 - [Capability audit](CAPABILITY_AUDIT.md) — audited controls, ranges, sample
   boundary, and pinned baseline
 - [Live routing](LIVE_ROUTING.md) — bus and Add/Replace behavior
-- [Sample source](SAMPLE_SOURCE.md) — catalogue, buffered loading, preset, and remount
+- [Sample source](SAMPLE_SOURCE.md) — catalogue, streaming, preset, and remount
   lifecycle
 - [Host modulation](HOST_MODULATION.md) — parameter-to-CV contract
 - [Analysis CV](ANALYSIS_CV.md) — optional output voltages and bus behavior
