@@ -69,14 +69,12 @@ static const _NT_parameter kParameterTemplate[] = {
     NT_PARAMETER_AUDIO_OUTPUT_WITH_MODE("Right output", 1, 14)
     {.name = "Source", .min = kSourceLive, .max = kSourceSample, .def = kSourceLive,
      .unit = kNT_unitEnum, .scaling = 0, .enumStrings = kSourceNames},
-    // This plug-in uses the API stream service, so these are ordinary catalogue
-    // indices, matching the SDK sampleStreamer example. String/confirm units
-    // advertise host-side filesystem editors, which enumerate the SD card when
-    // the parameter page opens. Capicola resolves names only in its custom UI.
+    // These units expose the NT/host folder and sample pickers. Names are
+    // supplied by parameterString() from the firmware sample catalogue.
     {.name = "Folder", .min = 0, .max = 0, .def = 0,
-     .unit = kNT_unitNone, .scaling = 0, .enumStrings = nullptr},
+     .unit = kNT_unitHasStrings, .scaling = 0, .enumStrings = nullptr},
     {.name = "Sample", .min = 0, .max = 0, .def = 0,
-     .unit = kNT_unitNone, .scaling = 0, .enumStrings = nullptr},
+     .unit = kNT_unitConfirm, .scaling = 0, .enumStrings = nullptr},
     {.name = "Pitch", .min = -120, .max = 120, .def = 0,
      .unit = kNT_unitSemitones, .scaling = kNT_scaling10, .enumStrings = nullptr},
     {.name = "Stretch", .min = 0, .max = 100, .def = 0,
@@ -628,7 +626,7 @@ void step(_NT_algorithm* base, float* busFrames, int numFramesBy4) {
         if (!sourceAvailable) {
             // Zero rendered frames means EOF or a host/card failure. Do not
             // retry potentially blocking stream work from subsequent audio
-            // callbacks. A later explicit Sample selection can refresh and reopen.
+            // callbacks. A later Sample confirmation can refresh and reopen.
             algorithm->streamOpen = false;
         }
         left = algorithm->sampleLeft;
