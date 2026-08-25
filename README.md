@@ -9,7 +9,7 @@ This is an independently maintained disting NT wrapper around
 [Capicola by Heavylight Industries](https://github.com/heavylight-industries/capicola),
 not an official Heavylight Industries release.
 
-- **Current release:** [v0.5.1](https://github.com/thorinside/capicola-nt/releases/tag/v0.5.1)
+- **Current release:** [v0.5.2](https://github.com/thorinside/capicola-nt/releases/tag/v0.5.2)
 - **Supported baseline:** disting NT firmware 1.16.0, plug-in API v13
 - **Plug-in GUID:** `ThCa`
 

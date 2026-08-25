@@ -6,7 +6,7 @@ should start with the [installation and user guide](../README.md).
 ## Released implementation
 
 The current published binary is
-[`v0.5.1`](https://github.com/thorinside/capicola-nt/releases/tag/v0.5.1).
+[`v0.5.2`](https://github.com/thorinside/capicola-nt/releases/tag/v0.5.2).
 
 | Item | Value |
 | --- | --- |
