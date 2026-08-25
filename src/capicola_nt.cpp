@@ -573,7 +573,6 @@ bool openPendingSampleStream(Algorithm* algorithm,
 
 bool advanceStreamPosition(uint32_t& sourceFrame,
                            float& sourceFraction,
-                           uint32_t sampleFrames,
                            uint32_t rendered,
                            float speed) {
     const float advance = sourceFraction +
@@ -584,8 +583,10 @@ bool advanceStreamPosition(uint32_t& sourceFrame,
     }
     const uint32_t wholeFrames = static_cast<uint32_t>(advance);
     sourceFraction = advance - static_cast<float>(wholeFrames);
-    const uint32_t remaining = sampleFrames - sourceFrame;
-    sourceFrame += wholeFrames < remaining ? wholeFrames : remaining;
+    if (wholeFrames > UINT32_MAX - sourceFrame) {
+        return false;
+    }
+    sourceFrame += wholeFrames;
     return true;
 }
 
@@ -601,7 +602,6 @@ bool primePendingSampleStream(Algorithm* algorithm, uint32_t frames) {
     if (bounded == 0U ||
         !advanceStreamPosition(algorithm->pendingSourceFrame,
                                algorithm->pendingSourceFraction,
-                               algorithm->pendingSample.frames,
                                bounded,
                                algorithm->pendingSampleSpeed)) {
         return false;
@@ -928,7 +928,6 @@ uint32_t renderStreamedSample(Algorithm* algorithm,
 
     if (!algorithm->sampleReady || !algorithm->samplePlaying ||
         algorithm->streamedSample.frames == 0 ||
-        algorithm->streamSourceFrame > algorithm->streamedSample.frames ||
         !std::isfinite(algorithm->streamSourceFraction) ||
         !std::isfinite(algorithm->sampleSpeed) ||
         algorithm->streamSourceFraction < 0.0f ||
@@ -962,13 +961,10 @@ uint32_t renderStreamedSample(Algorithm* algorithm,
     }
 
     while (total < static_cast<uint32_t>(frames)) {
-        if (algorithm->streamSourceFrame >= algorithm->streamedSample.frames) {
-            if (restartedThisBlock) break;
-            const SampleStreamSpec loop = algorithm->streamedSample;
-            if (!openSampleStream(algorithm, loop)) break;
-            restartedThisBlock = true;
-        }
-
+        // The catalogue count describes the selected entry, while the stream
+        // may resolve a velocity/round-robin variant. Keep consuming every
+        // valid frame the opened stream provides instead of reopening early at
+        // the catalogue boundary.
         const uint32_t requested = static_cast<uint32_t>(frames) - total;
         const uint32_t sourceFrameBefore = algorithm->streamSourceFrame;
         const float sourceFractionBefore = algorithm->streamSourceFraction;
@@ -987,7 +983,6 @@ uint32_t renderStreamedSample(Algorithm* algorithm,
         total += bounded;
         if (!advanceStreamPosition(algorithm->streamSourceFrame,
                                    algorithm->streamSourceFraction,
-                                   algorithm->streamedSample.frames,
                                    bounded,
                                    algorithm->sampleSpeed)) {
             algorithm->samplePlaying = false;
@@ -997,10 +992,12 @@ uint32_t renderStreamedSample(Algorithm* algorithm,
         if (bounded == requested) break;
         const float requestedAdvance = sourceFractionBefore +
             static_cast<float>(requested) * algorithm->sampleSpeed;
-        const bool expectedEnd = std::isfinite(requestedAdvance) &&
-            requestedAdvance >= static_cast<float>(
-                algorithm->streamedSample.frames - sourceFrameBefore);
-        if (!expectedEnd || restartedThisBlock) break;
+        const bool reachedReportedEnd =
+            sourceFrameBefore >= algorithm->streamedSample.frames ||
+            (std::isfinite(requestedAdvance) &&
+             requestedAdvance >= static_cast<float>(
+                 algorithm->streamedSample.frames - sourceFrameBefore));
+        if (!reachedReportedEnd || restartedThisBlock) break;
 
         const SampleStreamSpec loop = algorithm->streamedSample;
         if (!openSampleStream(algorithm, loop)) break;

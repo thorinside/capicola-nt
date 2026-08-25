@@ -117,7 +117,11 @@ and restart the same file, reopen the selector and press **LOAD**. Mono samples
 feed both channels; stereo samples keep their left/right order. Capicola streams
 the full file instead of copying it into a large memory buffer. Use a
 loop-prepared file when the wrap point needs to be seamless; Capicola does not
-edit loop points or add a boundary crossfade.
+edit loop points or add a boundary crossfade. The NT renderer is authoritative
+for the opened stream: Capicola does not restart merely because the catalogue's
+reported frame count has been reached while valid stream frames are still
+arriving. This prevents a longer physical variant from being cut into a short
+loop.
 
 When a different sample is opened, Capicola keeps the old stream audible until
 the new stream has actually returned its first frames. It then fades the old

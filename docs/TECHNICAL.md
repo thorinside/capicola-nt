@@ -30,11 +30,14 @@ normalization. Sample mode uses the API v13 folder catalogue and streaming API.
 Entering Sample mode and changing Folder open the exact valid selection outside
 the audio callback. Folder changes also synchronize Sample into the new legal
 range through the callback-safe host setter. `NT_streamRender()` converts and
-advances the source at the file-rate/host-rate ratio. At end of file, the wrapper
-performs at most one stream reopen per block; a short read that is not the
-expected boundary leaves the remainder silent for that block. Both channels
-render to private scratch buffers before Add/Replace audio output writes. Four
-optional analysis signals replace their selected CV buses and default to `None`.
+advances the source at the file-rate/host-rate ratio. The opened renderer remains
+authoritative if it supplies valid frames beyond the catalogue entry's reported
+count, which can differ from a resolved physical variant. Only a short render at
+or beyond that reported boundary permits the wrapper's at-most-once-per-block
+loop reopen; an earlier short render leaves the remainder silent for that block.
+Both channels render to private scratch buffers before Add/Replace audio output
+writes. Four optional analysis signals replace their selected CV buses and
+default to `None`.
 
 All persistent DSP, stream, and block storage comes from the memory supplied at
 construction; the audio path performs no heap allocation. Two opaque stream

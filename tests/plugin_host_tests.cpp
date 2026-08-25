@@ -37,6 +37,7 @@ float gStreamSourcePosition = 0.0f;
 uint32_t gOpenedFolder = 0;
 uint32_t gOpenedSample = 0;
 uint32_t gStreamInitialEmptyRenders = 0;
+uint32_t gOpenedStreamFrameCount = 0;
 _NT_algorithm* gAlgorithm = nullptr;
 const _NT_factory* gFactory = nullptr;
 struct HostStreamState {
@@ -44,6 +45,7 @@ struct HostStreamState {
     uint32_t sample;
     uint32_t clock;
     uint32_t emptyRendersRemaining;
+    uint32_t frameCount;
     float sourcePosition;
     bool open;
 };
@@ -172,6 +174,8 @@ extern "C" bool NT_streamOpen(_NT_stream stream,
         data.sample,
         0U,
         gStreamInitialEmptyRenders,
+        gOpenedStreamFrameCount == 0U
+            ? gSampleFrameCount : gOpenedStreamFrameCount,
         0.0f,
         gStreamOpenSucceeds,
     };
@@ -197,11 +201,11 @@ extern "C" uint32_t NT_streamRender(_NT_stream stream,
     const uint32_t sourceRate = state->folder == 1 ? 24000U : 48000U;
     uint32_t rendered = 0;
     for (; rendered < numFrames &&
-           state->sourcePosition < static_cast<float>(gSampleFrameCount);
+           state->sourcePosition < static_cast<float>(state->frameCount);
          ++rendered, ++state->clock) {
         const uint32_t index = static_cast<uint32_t>(state->sourcePosition);
         const float fraction = state->sourcePosition - static_cast<float>(index);
-        const uint32_t next = index + 1U < gSampleFrameCount ? index + 1U : index;
+        const uint32_t next = index + 1U < state->frameCount ? index + 1U : index;
         const float source0 = std::sin(
             2.0f * kPi * 330.0f * static_cast<float>(index) /
             static_cast<float>(sourceRate));
@@ -1034,7 +1038,6 @@ int main() {
             }
         }
     }
-
     const float sourcePosition = gStreamSourcePosition;
     factory->step(algorithm, buses.data(), kFrames / 4);
     const float* monoLeft = buses.data() + 12 * kFrames;
@@ -1091,7 +1094,7 @@ int main() {
     gDrawnText.clear();
     factory->draw(algorithm);
     if (gStreamOpenCalls != opensBeforeLoopStep + 2 ||
-        gStreamRenderCalls != rendersBeforeLoopStep + 3 ||
+        gStreamRenderCalls != rendersBeforeLoopStep + 4 ||
         !drawnTextContains("CAPICOLA") ||
         !drawnTextContains("Mono")) {
         return fail("sample stream loop or compact title was not retained");
@@ -1138,6 +1141,25 @@ int main() {
         gOpenedFolder != 1 || gOpenedSample != 0) {
         return fail("explicit sample LOAD did not recover after remount");
     }
+    settleSampleTransition();
+
+    // The opened stream is the playback authority. Filename conventions can
+    // make its physical variant longer than the catalogue entry used to open
+    // it, so valid rendered frames must not be cut off at the reported count.
+    gSampleFrameCount = 2048;
+    gOpenedStreamFrameCount = 8192;
+    pressSampleLoad();
+    settleSampleTransition();
+    const uint32_t opensBeforeReportedLength = gStreamOpenCalls;
+    for (int block = 0; block < 40; ++block) {
+        factory->step(algorithm, buses.data(), kFrames / 4);
+    }
+    if (gStreamOpenCalls != opensBeforeReportedLength) {
+        return fail("sample stream restarted at stale catalogue length");
+    }
+    gSampleFrameCount = 48000;
+    gOpenedStreamFrameCount = 0;
+    pressSampleLoad();
     settleSampleTransition();
 
     // Missing or moved catalogue entry: the saved folder index is no longer
