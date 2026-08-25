@@ -19,6 +19,8 @@ namespace {
 // additional source history. The two rings live in host-provided DRAM.
 constexpr int kRingFrames = 16384;
 constexpr float kSamplePlaybackGain = 8.0f;
+constexpr float kDspFullScaleVolts = 5.0f;
+constexpr float kNtVoltsToDsp = 1.0f / kDspFullScaleVolts;
 constexpr uint32_t kSampleTransitionRateDivisor = 20U; // 50 ms.
 using SourceProcessor = capicola_nt::CapicolaStereoLivePath<kRingFrames>;
 
@@ -56,6 +58,9 @@ enum Parameter {
     kParamOutputTransientOutput,
     kParamInputEnvelopeOutput,
     kParamOutputEnvelopeOutput,
+    // Released parameter indices above this line are preset-stable. Append
+    // wrapper controls here even when a page presents them earlier.
+    kParamInputGain,
     kNumParameters,
 };
 
@@ -121,9 +126,12 @@ static const _NT_parameter kParameterTemplate[] = {
     NT_PARAMETER_CV_OUTPUT("Output Transient output", 0, 0)
     NT_PARAMETER_CV_OUTPUT("Input Envelope output", 0, 0)
     NT_PARAMETER_CV_OUTPUT("Output Envelope output", 0, 0)
+    {.name = "Input Gain", .min = -60, .max = 0, .def = 0,
+     .unit = kNT_unitDb, .scaling = kNT_scalingNone, .enumStrings = nullptr},
 };
 
 static const uint8_t kPerformanceParameters[] = {
+    kParamInputGain,
     kParamPitch,
     kParamStretch,
     kParamThreshold,
@@ -209,6 +217,9 @@ struct Algorithm : public _NT_algorithm {
     bool processorFaulted;
     float lastOutputLeft;
     float lastOutputRight;
+    float inputGain;
+    float inputGainSmoothingCoefficient;
+    bool inputGainInitialized;
     SampleTransitionPhase sampleTransitionPhase;
     bool sampleTransitionFadeInPending;
     uint32_t sampleTransitionFrame;
@@ -315,6 +326,10 @@ _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& memory,
     if (algorithm->sampleTransitionFrames == 0U) {
         algorithm->sampleTransitionFrames = 1U;
     }
+    algorithm->inputGain = 1.0f;
+    algorithm->inputGainSmoothingCoefficient = 1.0f /
+        (1.0f + 0.01f * static_cast<float>(NT_globals.sampleRate));
+    algorithm->inputGainInitialized = false;
 
     const uint32_t folderCount = algorithm->cardMounted
         ? NT_getNumSampleFolders() : 0;
@@ -871,15 +886,45 @@ int parameterString(_NT_algorithm* base, int parameter, int value, char* buffer)
 void writeOutput(float* destination,
                  const float* source,
                  int frames,
+                 float outputGain,
                  bool replace) {
     if (replace) {
         for (int i = 0; i < frames; ++i) {
-            destination[i] = source[i];
+            destination[i] = source[i] * outputGain;
         }
     } else {
         for (int i = 0; i < frames; ++i) {
-            destination[i] += source[i];
+            destination[i] += source[i] * outputGain;
         }
+    }
+}
+
+float inputGainTarget(const Algorithm* algorithm) {
+    int32_t decibels = algorithm->v[kParamInputGain];
+    if (decibels < -60) decibels = -60;
+    if (decibels > 0) decibels = 0;
+    return std::exp2(static_cast<float>(decibels) / 6.020599913f);
+}
+
+void applyInputGain(Algorithm* algorithm,
+                    float* left,
+                    float* right,
+                    int frames) {
+    const float target = inputGainTarget(algorithm);
+    if (!algorithm->inputGainInitialized) {
+        // Preset restoration must start at its saved trim instead of exposing
+        // a short unity-gain burst. Later mapped/UI changes are smoothed.
+        algorithm->inputGain = target;
+        algorithm->inputGainInitialized = true;
+    }
+    for (int i = 0; i < frames; ++i) {
+        algorithm->inputGain += algorithm->inputGainSmoothingCoefficient *
+            (target - algorithm->inputGain);
+        if (std::fabs(target - algorithm->inputGain) < 1.0e-4f) {
+            algorithm->inputGain = target;
+        }
+        left[i] *= algorithm->inputGain;
+        right[i] *= algorithm->inputGain;
     }
 }
 
@@ -947,9 +992,11 @@ uint32_t renderStreamedSample(Algorithm* algorithm,
             const _NT_frame& frame = algorithm->streamFrames[
                 algorithm->activePrefetchOffset + i];
             algorithm->sampleLeft[outputOffset + total + i] =
-                std::isfinite(frame[0]) ? frame[0] * kSamplePlaybackGain : 0.0f;
+                std::isfinite(frame[0])
+                    ? frame[0] : 0.0f;
             algorithm->sampleRight[outputOffset + total + i] =
-                std::isfinite(frame[1]) ? frame[1] * kSamplePlaybackGain : 0.0f;
+                std::isfinite(frame[1])
+                    ? frame[1] : 0.0f;
         }
         algorithm->activePrefetchOffset += copied;
         total += copied;
@@ -976,9 +1023,9 @@ uint32_t renderStreamedSample(Algorithm* algorithm,
             const float left = algorithm->streamFrames[i][0];
             const float right = algorithm->streamFrames[i][1];
             algorithm->sampleLeft[outputOffset + total + i] = std::isfinite(left)
-                ? left * kSamplePlaybackGain : 0.0f;
+                ? left : 0.0f;
             algorithm->sampleRight[outputOffset + total + i] = std::isfinite(right)
-                ? right * kSamplePlaybackGain : 0.0f;
+                ? right : 0.0f;
         }
         total += bounded;
         if (!advanceStreamPosition(algorithm->streamSourceFrame,
@@ -1046,6 +1093,10 @@ bool processSampleSegment(Algorithm* algorithm,
                     static_cast<std::size_t>(frames) * sizeof(float));
         return false;
     }
+    applyInputGain(algorithm,
+                   algorithm->sampleLeft + offset,
+                   algorithm->sampleRight + offset,
+                   frames);
     algorithm->processor->process(algorithm->sampleLeft + offset,
                                   algorithm->sampleRight + offset,
                                   algorithm->scratchLeft + offset,
@@ -1184,10 +1235,12 @@ void step(_NT_algorithm* base, float* busFrames, int numFramesBy4) {
             : busFrames + (rightInputBus - 1) * frames;
         for (int i = 0; i < frames; ++i) {
             algorithm->sampleLeft[i] = std::isfinite(rawLeft[i])
-                ? rawLeft[i] : 0.0f;
+                ? rawLeft[i] * kNtVoltsToDsp : 0.0f;
             algorithm->sampleRight[i] = std::isfinite(rawRight[i])
-                ? rawRight[i] : 0.0f;
+                ? rawRight[i] * kNtVoltsToDsp : 0.0f;
         }
+        applyInputGain(algorithm, algorithm->sampleLeft,
+                       algorithm->sampleRight, frames);
         left = algorithm->sampleLeft;
         right = algorithm->sampleRight;
     } else {
@@ -1226,13 +1279,21 @@ void step(_NT_algorithm* base, float* busFrames, int numFramesBy4) {
         (algorithm->v[kParamLeftOutput] - 1) * frames;
     float* rightOutput = busFrames +
         (algorithm->v[kParamRightOutput] - 1) * frames;
+    // NT stream frames already use the normalized audio domain expected by
+    // Capicola. Preserve the established NT sample-player level only after
+    // processing, so a full-scale WAV cannot overdrive the DSP input merely
+    // because its dry output is conventionally 8 V.
+    const float outputGain = algorithm->activeSource == kSourceSample
+        ? kSamplePlaybackGain : kDspFullScaleVolts;
     writeOutput(leftOutput,
                 algorithm->scratchLeft,
                 frames,
+                outputGain,
                 algorithm->v[kParamLeftOutputMode] != 0);
     writeOutput(rightOutput,
                 algorithm->scratchRight,
                 frames,
+                outputGain,
                 algorithm->v[kParamRightOutputMode] != 0);
 
     const bool analysisValid = rendered &&

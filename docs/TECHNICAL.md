@@ -39,6 +39,18 @@ Both channels render to private scratch buffers before Add/Replace audio output
 writes. Four optional analysis signals replace their selected CV buses and
 default to `None`.
 
+The wrapper treats disting NT audio buses as volts and the pinned Capicola
+engine as normalized audio. Live audio is divided by 5 before the engine and
+multiplied by 5 at the audio-output boundary. Streamed WAV frames first receive
+processing in their native normalized float domain, then receive the API
+sample-player's established 8x output scaling after the engine. The appended
+**Input Gain** parameter is an attenuation-only
+-60–0 dB wrapper trim shared by Live and Sample. Its changes use a bounded
+10 ms smoothing state; the first block starts directly at the restored value.
+At 0 dB and 0% Mix, the round trip is voltage-transparent. No limiter is added,
+and Add mode may raise the final shared-bus level beyond this plug-in's own
+contribution.
+
 All persistent DSP, stream, and block storage comes from the memory supplied at
 construction; the audio path performs no heap allocation. Two opaque stream
 slots use `NT_globals.streamSizeBytes`, and their two host buffers use
@@ -65,8 +77,10 @@ contains only Mix, with analysis activity left to the optional CV outputs.
 Stretch retains the upstream taper but is rendered as a time factor or
 **FREEZE**. Pot-originated values are
 mirrored immediately for display while the host commits the parameter update.
-All twelve continuous processing controls remain ordinary host parameters on
-the Performance page.
+All twelve upstream continuous processing controls and the wrapper's Input Gain
+remain ordinary host parameters on the Performance page. Input Gain is appended
+to the underlying parameter array so every released parameter index remains
+preset-stable.
 
 Replacing or explicitly reopening a sample prepares a second fixed stream slot.
 The old stream remains audible until `NT_streamRender()` returns the replacement's

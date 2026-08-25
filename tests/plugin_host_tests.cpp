@@ -4,11 +4,14 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include <distingnt/api.h>
 #include <distingnt/wav.h>
+
+#include "capicola_nt/live_path.h"
 
 namespace {
 
@@ -307,6 +310,7 @@ int main() {
     const int driveCharacter = findParameter(algorithm, count, "Drive Character");
     const int mix = findParameter(algorithm, count, "Mix");
     const int feedbackTone = findParameter(algorithm, count, "Feedback Tone");
+    const int inputGain = findParameter(algorithm, count, "Input Gain");
     const int inputTransientOutput = findParameter(
         algorithm, count, "Input Transient output");
     const int outputTransientOutput = findParameter(
@@ -319,7 +323,7 @@ int main() {
         rightOutput < 0 || rightMode < 0 || source < 0 || folder < 0 || sample < 0 ||
         pitch < 0 || stretch < 0 || threshold < 0 || grain < 0 || quality < 0 ||
         feedback < 0 || envelopeSmoothing < 0 || fade < 0 || drive < 0 ||
-        driveCharacter < 0 || mix < 0 || feedbackTone < 0 ||
+        driveCharacter < 0 || mix < 0 || feedbackTone < 0 || inputGain < 0 ||
         inputTransientOutput < 0 || outputTransientOutput < 0 ||
         inputEnvelopeOutput < 0 || outputEnvelopeOutput < 0) {
         return fail("expected performance, source, and routing parameters are unavailable");
@@ -348,6 +352,7 @@ int main() {
     const int auditedControls[] = {
         pitch, stretch, threshold, grain, quality, feedback,
         envelopeSmoothing, fade, drive, driveCharacter, mix, feedbackTone,
+        inputGain,
     };
     int audioInputParameters = 0;
     for (int parameter = 0; parameter < count; ++parameter) {
@@ -365,6 +370,14 @@ int main() {
             algorithm->parameters[parameter].unit == kNT_unitAudioInput) {
             return fail("an audited control is not an ordinary NT parameter");
         }
+    }
+    const _NT_parameter& inputGainDefinition =
+        algorithm->parameters[inputGain];
+    if (inputGain != count - 1 || inputGainDefinition.min != -60 ||
+        inputGainDefinition.max != 0 || inputGainDefinition.def != 0 ||
+        inputGainDefinition.unit != kNT_unitDb ||
+        inputGainDefinition.scaling != kNT_scalingNone) {
+        return fail("Input Gain is not an appended attenuation-only dB control");
     }
     const int secondaryControls[] = {
         envelopeSmoothing, fade, drive, driveCharacter, feedbackTone,
@@ -561,6 +574,69 @@ int main() {
     factory->parameterChanged(algorithm, mix);
 
     std::vector<float> buses(kNT_lastBus * kFrames, 0.0f);
+    // Differentially compare the complete host wrapper against the same
+    // upstream processor fed normalized audio. A 4 V NT signal must arrive at
+    // Capicola as 0.8 normalized and return to the bus at 5 V per normalized
+    // unit. This catches accidental volt-domain overdrive without asserting a
+    // new limiter or otherwise changing the DSP.
+    {
+        using ReferenceProcessor =
+            capicola_nt::CapicolaStereoLivePath<16384>;
+        values[threshold] = 100;
+        values[grain] = 32;
+        values[quality] = 0;
+        values[envelopeSmoothing] = 0;
+        values[fade] = 0;
+        values[drive] = 0;
+        values[driveCharacter] = 5000;
+        values[feedbackTone] = 0;
+        auto reference = std::make_unique<ReferenceProcessor>();
+        reference->init();
+        reference->setPitchSemitones(0.0f);
+        reference->setStretch(1.0f);
+        reference->setTransientThreshold(1.0e9f);
+        reference->setGrainSize(32);
+        reference->setQuality(0.1f);
+        reference->setFeedback(0.0f);
+        reference->setEnvelopeSmoothing(5.0e-5f);
+        reference->setFade(480.0f);
+        reference->setDrive(0.5f);
+        reference->setDriveCharacter(0.5f);
+        reference->setMix(1.0f);
+        reference->setFeedbackTone(2.0e-3f);
+
+        std::vector<float> normalizedInput(kFrames, 0.0f);
+        std::vector<float> referenceLeft(kFrames, 0.0f);
+        std::vector<float> referenceRight(kFrames, 0.0f);
+        int levelClock = 0;
+        for (int block = 0; block < 320; ++block) {
+            std::fill(buses.begin(), buses.end(), 0.0f);
+            for (int i = 0; i < kFrames; ++i, ++levelClock) {
+                normalizedInput[i] = 0.8f * std::sin(
+                    2.0f * kPi * 220.0f * levelClock / 48000.0f);
+                buses[i] = normalizedInput[i] * 5.0f;
+            }
+            reference->process(normalizedInput.data(), nullptr,
+                               referenceLeft.data(), referenceRight.data(),
+                               kFrames);
+            factory->step(algorithm, buses.data(), kFrames / 4);
+            for (int i = 0; i < kFrames; ++i) {
+                const float expectedLeft = referenceLeft[i] * 5.0f;
+                const float expectedRight = referenceRight[i] * 5.0f;
+                if (std::fabs(buses[12 * kFrames + i] - expectedLeft) >
+                        1.0e-5f ||
+                    std::fabs(buses[13 * kFrames + i] - expectedRight) >
+                        1.0e-5f) {
+                    return fail("NT volts were not normalized around Capicola DSP");
+                }
+            }
+        }
+        for (int parameter : auditedControls) {
+            values[parameter] = algorithm->parameters[parameter].def;
+        }
+    }
+    std::fill(buses.begin(), buses.end(), 0.0f);
+
     // No analysis bus may be claimed on first load while all four selectors
     // retain their zero defaults.
     for (int bus = 14; bus < 18; ++bus) {
@@ -575,6 +651,44 @@ int main() {
             }
         }
     }
+    std::fill(buses.begin(), buses.end(), 0.0f);
+
+    // Capicola's upstream processor uses normalized audio while disting NT
+    // buses use volts. Exercise the real wrapper boundary with a full-scale
+    // +/-5 V signal: 0 dB must remain unity at dry Mix, and -12 dB must
+    // provide predictable headroom without changing the DSP implementation.
+    values[mix] = 0;
+    values[inputGain] = 0;
+    for (int i = 0; i < kFrames; ++i) {
+        buses[i] = (i & 1) == 0 ? 5.0f : -5.0f;
+    }
+    factory->step(algorithm, buses.data(), kFrames / 4);
+    for (int i = 0; i < kFrames; ++i) {
+        const float expected = (i & 1) == 0 ? 5.0f : -5.0f;
+        if (std::fabs(buses[12 * kFrames + i] - expected) > 1.0e-5f ||
+            std::fabs(buses[13 * kFrames + i] - expected) > 1.0e-5f) {
+            return fail("0 dB Input Gain did not preserve dry NT audio level");
+        }
+    }
+
+    values[inputGain] = -12;
+    for (int block = 0; block < 120; ++block) {
+        for (int i = 0; i < kFrames; ++i) {
+            buses[i] = (i & 1) == 0 ? 5.0f : -5.0f;
+        }
+        factory->step(algorithm, buses.data(), kFrames / 4);
+    }
+    const float expectedAttenuated = 5.0f * std::exp2(-12.0f / 6.020599913f);
+    for (int i = 0; i < kFrames; ++i) {
+        const float expected = (i & 1) == 0
+            ? expectedAttenuated : -expectedAttenuated;
+        if (std::fabs(buses[12 * kFrames + i] - expected) > 1.0e-3f ||
+            std::fabs(buses[13 * kFrames + i] - expected) > 1.0e-3f) {
+            return fail("Input Gain did not create the requested dry-path headroom");
+        }
+    }
+    values[inputGain] = 0;
+    values[mix] = 100;
     std::fill(buses.begin(), buses.end(), 0.0f);
 
     // Simulate SD/catalogue activity caused by opening an external Source panel
@@ -905,6 +1019,104 @@ int main() {
             return fail("host-mapped dry Mix value did not reach selected-sample processing");
         }
     }
+    values[inputGain] = -12;
+    uint32_t trimmedSampleClock = 0U;
+    for (int block = 0; block < 120; ++block) {
+        trimmedSampleClock = gStreamClock;
+        factory->step(algorithm, buses.data(), kFrames / 4);
+    }
+    const float sampleTrim = std::exp2(-12.0f / 6.020599913f);
+    for (int i = 0; i < kFrames; ++i) {
+        const float expectedLeft = 8.0f * sampleTrim * std::sin(
+            2.0f * kPi * 330.0f *
+            static_cast<float>(trimmedSampleClock + i) / 48000.0f);
+        const float expectedRight = 8.0f * sampleTrim * 0.35f * std::sin(
+            2.0f * kPi * 710.0f *
+            static_cast<float>(trimmedSampleClock + i) / 48000.0f);
+        if (std::fabs(buses[12 * kFrames + i] - expectedLeft) > 1.0e-5f ||
+            std::fabs(buses[13 * kFrames + i] - expectedRight) > 1.0e-5f) {
+            return fail("Input Gain did not attenuate the dry sample source");
+        }
+    }
+    values[inputGain] = 0;
+    for (int block = 0; block < 120; ++block) {
+        factory->step(algorithm, buses.data(), kFrames / 4);
+    }
+
+    // Prove the streamed WAV side of the same boundary independently of its
+    // dry level. A source switch resets both processors; normalized stream
+    // frames must produce the same wet signal as the pinned Capicola path,
+    // with the established 8 V sample-player scaling applied only afterward.
+    values[threshold] = 100;
+    values[grain] = 32;
+    values[quality] = 0;
+    values[envelopeSmoothing] = 0;
+    values[fade] = 0;
+    values[drive] = 0;
+    values[driveCharacter] = 5000;
+    values[feedbackTone] = 0;
+    values[mix] = 100;
+    values[source] = 0;
+    factory->parameterChanged(algorithm, source);
+    values[source] = 1;
+    factory->parameterChanged(algorithm, source);
+    {
+        using ReferenceProcessor =
+            capicola_nt::CapicolaStereoLivePath<16384>;
+        auto reference = std::make_unique<ReferenceProcessor>();
+        reference->init();
+        reference->setPitchSemitones(0.0f);
+        reference->setStretch(1.0f);
+        reference->setTransientThreshold(1.0e9f);
+        reference->setGrainSize(32);
+        reference->setQuality(0.1f);
+        reference->setFeedback(0.0f);
+        reference->setEnvelopeSmoothing(5.0e-5f);
+        reference->setFade(480.0f);
+        reference->setDrive(0.5f);
+        reference->setDriveCharacter(0.5f);
+        reference->setMix(1.0f);
+        reference->setFeedbackTone(2.0e-3f);
+
+        std::vector<float> sampleLeft(kFrames, 0.0f);
+        std::vector<float> sampleRight(kFrames, 0.0f);
+        std::vector<float> referenceLeft(kFrames, 0.0f);
+        std::vector<float> referenceRight(kFrames, 0.0f);
+        uint32_t referenceClock = 0U;
+        for (int block = 0; block < 320; ++block) {
+            for (int i = 0; i < kFrames; ++i, ++referenceClock) {
+                sampleLeft[i] = std::sin(
+                    2.0f * kPi * 330.0f *
+                    static_cast<float>(referenceClock) / 48000.0f);
+                sampleRight[i] = 0.35f * std::sin(
+                    2.0f * kPi * 710.0f *
+                    static_cast<float>(referenceClock) / 48000.0f);
+            }
+            reference->process(sampleLeft.data(), sampleRight.data(),
+                               referenceLeft.data(), referenceRight.data(),
+                               kFrames);
+            factory->step(algorithm, buses.data(), kFrames / 4);
+            // Initial Sample selection has its documented 50 ms fade-in.
+            // Compare after that wrapper-only transition has completed.
+            if (block < 40) continue;
+            for (int i = 0; i < kFrames; ++i) {
+                if (std::fabs(buses[12 * kFrames + i] -
+                              referenceLeft[i] * 8.0f) > 1.0e-5f ||
+                    std::fabs(buses[13 * kFrames + i] -
+                              referenceRight[i] * 8.0f) > 1.0e-5f) {
+                    return fail("stream frames were not normalized around Capicola DSP");
+                }
+            }
+        }
+    }
+    for (int parameter : auditedControls) {
+        values[parameter] = algorithm->parameters[parameter].def;
+    }
+    values[source] = 0;
+    factory->parameterChanged(algorithm, source);
+    values[source] = 1;
+    factory->parameterChanged(algorithm, source);
+
     // Move the same host-mapped effective parameter to fully wet, again
     // without a plug-in-specific CV parameter or a parameter callback.
     values[mix] = 100;

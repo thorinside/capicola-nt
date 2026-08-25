@@ -55,11 +55,13 @@ The factory routing is ready for a basic stereo patch:
 | Right output | Bus 14 / output 2 | Processed right output |
 | Output modes | Add | Add Capicola to anything already on those buses |
 | Source | Live | Process the selected input buses |
+| Input Gain | 0 dB | Attenuate the active source before processing |
 
 1. Patch a stereo source to inputs 1 and 2. For mono, set **Right input** to
    `None`; the left input will feed both processing channels.
 2. Listen to outputs 1 and 2.
-3. Begin with **Stretch** at 0%, **Feedback** at 0%, and **Mix** at 100%.
+3. Begin with **Input Gain** at 0 dB, **Stretch** at 0%, **Feedback** at
+   0%, and **Mix** at 100%.
 4. If these output buses are dedicated to Capicola, change both output modes to
    **Replace**. Leave them on **Add** only when you intentionally want to mix
    Capicola with other algorithms on the same buses.
@@ -153,6 +155,7 @@ continuous controls are on the NT **Performance** parameter page.
 
 | Control | Range/action | Default | What it does |
 | --- | ---: | ---: | --- |
+| Input Gain | -60–0 dB | 0 dB | Attenuates Live or Sample before the engine; it also affects the dry path |
 | Pitch | -12 to +12 semitones | 0 | Transposes the processed audio |
 | Stretch | 1.0× to Freeze | 1.0× | Slows the playback grid; the screen shows the time factor |
 | Threshold | 0–100% | 22% | Sets the automatic transient threshold; 100% disables automatic triggers |
@@ -169,6 +172,13 @@ continuous controls are on the NT **Performance** parameter page.
 
 Feedback above 100% can grow rapidly and become loud. Reduce Feedback and your
 monitoring level before experimenting in that range.
+
+At 0 dB Input Gain and 0% Mix, Capicola is level-transparent: the output is the
+same voltage as the selected input. Lower Input Gain when the wet engine sounds
+overdriven. Input Gain changes are smoothed to avoid zippering, while a restored
+preset starts directly at its saved value. Add mode can still make the final
+shared bus louder by summing Capicola with signal already on that bus; use
+Replace when the output bus is dedicated to Capicola.
 
 ### Hear a longer stretch
 
@@ -217,6 +227,9 @@ analysis signal and an audio output—to the same bus.
   selected folder/sample still exists, then reopen the selector and press LOAD.
 - **The level keeps increasing:** set Feedback below 100%, preferably to 0%
   while diagnosing the patch.
+- **The sound is clipped or harsh:** set Mix to 0% and Input Gain to 0 dB to
+  confirm dry unity, then lower Input Gain before raising Mix again. Also use
+  Replace on a dedicated output bus so another signal is not being summed.
 - **CV is not changing a control:** use the NT parameter-mapping interface;
   Capicola does not expose dedicated modulation input parameters.
 
