@@ -116,6 +116,107 @@ void testCapicolaProcessesNormalizedStereo() {
     CHECK(energy > 0.01f);
 }
 
+void testSliceBeforeFirstAudioPreservesProcessing() {
+    static capicola_nt::CapicolaStereoLivePath<16384> sliced, reference;
+    sliced.init();
+    reference.init();
+    sliced.setPitchSemitones(12.0f);
+    reference.setPitchSemitones(12.0f);
+    sliced.triggerSlice();
+
+    constexpr int frames = 64;
+    float input[frames];
+    float outLeft[frames];
+    float outRight[frames];
+    float expectedLeft[frames];
+    float expectedRight[frames];
+    float maximumDifference = 0.0f;
+    float maximumDryDifference = 0.0f;
+    for (int block = 0; block < 300; ++block) {
+        for (int i = 0; i < frames; ++i) {
+            input[i] = 0.5f * std::sin(
+                2.0 * M_PI * 233.0 * (block * frames + i) / 48000.0);
+        }
+        sliced.process(input, nullptr, outLeft, outRight, frames);
+        reference.process(input, nullptr, expectedLeft, expectedRight, frames);
+        const float* outputs[2] = {outLeft, outRight};
+        const float* expected[2] = {expectedLeft, expectedRight};
+        for (int channel = 0; channel < 2; ++channel) {
+            for (int i = 0; i < frames; ++i) {
+                const float difference = std::fabs(
+                    outputs[channel][i] - expected[channel][i]);
+                const float dryDifference = std::fabs(
+                    outputs[channel][i] - input[i]);
+                if (difference > maximumDifference) maximumDifference = difference;
+                if (dryDifference > maximumDryDifference) {
+                    maximumDryDifference = dryDifference;
+                }
+            }
+        }
+    }
+
+    // There is no captured audio to slice yet: startup must sound like an
+    // untouched instance, and must not remain in dry bypass.
+    std::printf("startup Slice: reference difference %.6f, dry difference %.6f\n",
+                maximumDifference, maximumDryDifference);
+    CHECK(maximumDifference < 1.0e-6f);
+    CHECK(maximumDryDifference > 0.1f);
+}
+
+void testAsymmetricTransientsKeepStereoSourceTimesClose() {
+    static capicola_nt::CapicolaStereoLivePath<16384> path;
+    constexpr int frames = 64;
+    constexpr int totalFrames = 48000 * 8;
+    constexpr int observationFrames = 12000;
+    float left[frames];
+    float right[frames];
+    float outLeft[frames];
+    float outRight[frames];
+
+    for (int transientChannel = 0; transientChannel < 2; ++transientChannel) {
+        path.init();
+        path.setStretch(0.1767767f); // Midpoint: about 5.7x stretch.
+        path.setTransientThreshold(2.0f);
+        path.setEnvelopeSmoothing(0.0014f);
+        path.setFade(960.0f);
+        path.setGrainSize(32);
+        double sums[2] = {};
+
+        for (int offset = 0; offset < totalFrames; offset += frames) {
+            for (int i = 0; i < frames; ++i) {
+                const int sample = offset + i;
+                // The common ramp marks source time in the observable audio.
+                // Only one side has transients that naturally catch up playback.
+                const float ramp = 0.6f * sample / totalFrames;
+                const int burstSample = sample % 24000;
+                const float burst = burstSample < 4000
+                    ? 0.7f * std::exp(-burstSample / 300.0f) *
+                        std::sin(2.0 * M_PI * 1500.0 * sample / 48000.0)
+                    : 0.0f;
+                left[i] = ramp + (transientChannel == 0 ? burst : 0.0f);
+                right[i] = ramp + (transientChannel == 1 ? burst : 0.0f);
+            }
+            path.process(left, right, outLeft, outRight, frames);
+            for (int i = 0; i < frames; ++i) {
+                if (offset + i >= totalFrames - observationFrames) {
+                    sums[0] += outLeft[i];
+                    sums[1] += outRight[i];
+                }
+            }
+        }
+
+        const double meanLeft = sums[0] / observationFrames;
+        const double meanRight = sums[1] / observationFrames;
+        std::printf("stereo catch-up: transients on %d, output means %.6f / %.6f\n",
+                    transientChannel, meanLeft, meanRight);
+        // Near the end both outputs should play recent source material. With
+        // unbounded stereo drift, the quiet side still plays the early ramp.
+        CHECK(meanLeft > 0.45);
+        CHECK(meanRight > 0.45);
+        CHECK(std::fabs(meanLeft - meanRight) < 0.08);
+    }
+}
+
 void testLivePitchAndGrainChangesRemainFinite() {
     static capicola_nt::CapicolaStereoLivePath<16384> path;
     path.init();
@@ -226,6 +327,8 @@ int main() {
     testStereoCorrespondence();
     testLeftNormalizationAndRightRestore();
     testCapicolaProcessesNormalizedStereo();
+    testSliceBeforeFirstAudioPreservesProcessing();
+    testAsymmetricTransientsKeepStereoSourceTimesClose();
     testLivePitchAndGrainChangesRemainFinite();
     testFeedbackDriveToneAndMixChangesRemainFinite();
     testFarSparseWindowSeekUsesBoundedFallback();

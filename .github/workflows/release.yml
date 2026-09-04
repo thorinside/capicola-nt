@@ -30,7 +30,9 @@ jobs:
       - name: Prepare release notices
         shell: bash
         run: |
-          cat > build/release/release-notes.md <<EOF
+          cat docs/RELEASE_NOTES.md > build/release/release-notes.md
+          cat >> build/release/release-notes.md <<EOF
+
           Capicola for disting NT is an independently maintained wrapper around [Capicola](https://github.com/heavylight-industries/capicola), not an official Heavylight Industries release.
 
           **License:** GNU Affero General Public License, version 3 (AGPL-3.0-only). There is no warranty.

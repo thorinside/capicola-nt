@@ -9,12 +9,13 @@ This is an independently maintained disting NT wrapper around
 [Capicola by Heavylight Industries](https://github.com/heavylight-industries/capicola),
 not an official Heavylight Industries release.
 
-- **Current release:** [v0.5.2](https://github.com/thorinside/capicola-nt/releases/tag/v0.5.2)
+- **Current release:** [v0.5.3](https://github.com/thorinside/capicola-nt/releases/tag/v0.5.3)
 - **Supported baseline:** disting NT firmware 1.16.0, plug-in API v13
 - **Plug-in GUID:** `ThCa`
 
 Developers and reviewers can find the build, architecture, provenance, and
-release information in the shorter [technical reference](docs/TECHNICAL.md).
+release information in the shorter [technical reference](docs/TECHNICAL.md)
+and [release notes](docs/RELEASE_NOTES.md).
 
 ## Install
 
@@ -67,7 +68,9 @@ The factory routing is ready for a basic stereo patch:
    Capicola with other algorithms on the same buses.
 
 Live and Sample are replacement source modes. They are never mixed together
-inside Capicola.
+inside Capicola. Switching source clears the engine's old history and blends
+from the last audible output voltage into the new output over 10 ms to soften
+the switch.
 
 ## Use the performance screen
 
@@ -86,7 +89,10 @@ bank and an ALT bank:
 | Press right encoder | Trigger Slice | — |
 
 The three visible control names show which pot bank is active. The bottom line
-shows only the current Mix.
+shows only the current Mix. After switching banks, each pot must reach or pass
+its displayed value before changing it. This pickup behavior prevents a small
+movement from jumping the newly selected control. Pressing Slice before the
+engine has received its first audio block is ignored.
 
 The title line always keeps the plug-in identity visible:
 
@@ -112,9 +118,11 @@ arbitrary paths itself.
    a replacement it keeps the old name until the silent handoff, then changes to
    the new name. **CAPICOLA WAIT** means that no sample stream is available.
 
-Samples loop continuously, forward, from the beginning. Changing Folder opens
+Samples loop forward from the beginning. In Sample mode, changing Folder opens
 the current valid Sample in that folder; if the old Sample number is outside the
-new folder's range, the NT value is moved into range before opening. To reload
+new folder's range, the NT value is moved into range before opening. Changing
+Folder or refreshing the SD catalogue while Live is selected leaves the live
+audio and its processing history intact. To reload
 and restart the same file, reopen the selector and press **LOAD**. Mono samples
 feed both channels; stereo samples keep their left/right order. Capicola streams
 the full file instead of copying it into a large memory buffer. Use a
@@ -123,7 +131,14 @@ edit loop points or add a boundary crossfade. The NT renderer is authoritative
 for the opened stream: Capicola does not restart merely because the catalogue's
 reported frame count has been reached while valid stream frames are still
 arriving. This prevents a longer physical variant from being cut into a short
-loop.
+loop. If a stream has already played but then supplies no further frames for
+100 ms, Capicola retries it from the beginning. Any returned frames reset this
+wait; initial loading waits for its first frames without repeatedly restarting.
+
+The NT streaming API does not distinguish end-of-file from an underrun. A
+physical variant shorter than its catalogue entry can therefore have a 100 ms
+gap before looping, and an underrun lasting 100 ms can restart playback.
+Seamless looping is not guaranteed, even with a prepared file.
 
 When a different sample is opened, Capicola keeps the old stream audible until
 the new stream has actually returned its first frames. It then fades the old
@@ -143,7 +158,8 @@ drops or fades the affected audio block rather than crashing. After inserting
 or remounting the card, reopen the sample selector and press **LOAD** if the
 stream does not resume. The audio callback performs no catalogue scans or
 parameter-definition changes; its only SD operation is the NT's bounded stream
-renderer and a single reopen at a loop boundary.
+renderer and at most one reopen per audio block for looping or stalled-stream
+recovery.
 
 Capicola does not add reverse playback, scrubbing, regions, chopping,
 polyphony, recording, or live/sample mixing.
@@ -193,6 +209,10 @@ At the upstream taper's midpoint the screen shows about **5.7×**; the clockwise
 stop shows **FREEZE**. Grain Size changes the distance between adaptive splices,
 not the maximum Stretch. Press the right encoder only when you intentionally
 want a manual Slice to catch up.
+
+Stereo channels follow their own transients. When just one channel catches up
+and their source positions differ by more than one second, Capicola also
+catches up the other channel, preserving the upstream stereo coordination.
 
 ## CV modulation and analysis outputs
 

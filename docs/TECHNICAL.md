@@ -6,7 +6,8 @@ should start with the [installation and user guide](../README.md).
 ## Released implementation
 
 The current published binary is
-[`v0.5.2`](https://github.com/thorinside/capicola-nt/releases/tag/v0.5.2).
+[`v0.5.3`](https://github.com/thorinside/capicola-nt/releases/tag/v0.5.3).
+See the [release notes](RELEASE_NOTES.md) for the wrapper fixes in this version.
 
 | Item | Value |
 | --- | --- |
@@ -22,8 +23,11 @@ The current published binary is
 The wrapper is deliberately narrow. It links the pinned Capicola DSP, provides
 one stereo engine for mutually exclusive Live and Sample sources, exposes the
 audited processing controls, and uses ordinary NT parameter mapping for CV.
-Changing source resets the engine so history from the replaced source cannot
-sound afterward.
+Changing source resets the engine. A 10 ms linear bridge retains only the last
+audible stereo voltage and blends it into the new output, accounting for the
+different Live and Sample output gains. It does not retain the old source's
+playback history. Inactive Folder changes and SD mount-state refreshes leave
+the Live engine intact.
 
 Live mode reads the selected logical buses, with optional left-to-right mono
 normalization. Sample mode uses the API v13 folder catalogue and streaming API.
@@ -32,9 +36,15 @@ the audio callback. Folder changes also synchronize Sample into the new legal
 range through the callback-safe host setter. `NT_streamRender()` converts and
 advances the source at the file-rate/host-rate ratio. The opened renderer remains
 authoritative if it supplies valid frames beyond the catalogue entry's reported
-count, which can differ from a resolved physical variant. Only a short render at
-or beyond that reported boundary permits the wrapper's at-most-once-per-block
-loop reopen; an earlier short render leaves the remainder silent for that block.
+count, which can differ from a resolved physical variant. After the stream has
+returned its first frames, a short render at or beyond the reported boundary
+permits a loop reopen. A stream that stalls before that boundary is reopened
+after 100 ms of missing host frames. The missing-frame count resets on any
+progress, reopen, or replacement handoff; startup never reopens before its first
+progress. Reopening remains limited to once per audio block. API v13 reports
+only a frame count, with no EOF status: shorter physical variants can have a
+100 ms gap, and an underrun lasting at least 100 ms may restart the stream.
+This is bounded recovery, not a seamless-EOF guarantee.
 Both channels render to private scratch buffers before Add/Replace audio output
 writes. Four optional analysis signals replace their selected CV buses and
 default to `None`.
@@ -51,6 +61,13 @@ At 0 dB and 0% Mix, the round trip is voltage-transparent. No limiter is added,
 and Add mode may raise the final shared-bus level beyond this plug-in's own
 contribution.
 
+The wrapper preserves the upstream stereo guard: if exactly one recorder
+auto-fires in a block and the two source-grid lags differ by more than 48,000
+frames (one second at 48 kHz), it queues a Slice for the other channel. Below
+that threshold the channels retain independent transient timing. A manual Slice
+is ignored until the recorder enters `LIVE_EFFECT`, preserving the queued
+startup request while a sample is still waiting for its first frames.
+
 All persistent DSP, stream, and block storage comes from the memory supplied at
 construction; the audio path performs no heap allocation. Two opaque stream
 slots use `NT_globals.streamSizeBytes`, and their two host buffers use
@@ -63,7 +80,7 @@ a megabyte of DRAM. The three persistent shaper tables are initialized directly
 in that storage; the ARM build rejects any function whose static stack
 requirement exceeds 1 KiB. The audio callback performs no SD catalogue queries
 or parameter-definition updates. Its only file operation is the bounded host
-stream render, plus one possible reopen at a loop boundary. A stream underrun,
+stream render, plus one possible reopen for looping or stalled-stream recovery. A stream underrun,
 missing source block, or non-finite DSP result ramps or drops toward silence;
 catalogue refresh and explicit recovery wait for a parameter/UI event.
 
@@ -77,7 +94,12 @@ contains only Mix, with analysis activity left to the optional CV outputs.
 Stretch retains the upstream taper but is rendered as a time factor or
 **FREEZE**. Pot-originated values are
 mirrored immediately for display while the host commits the parameter update.
-All twelve upstream continuous processing controls and the wrapper's Input Gain
+After an internal pot-bank change, each pot waits until its physical position
+crosses the current displayed target or comes within 0.005 of it on the
+normalized sweep. The bank-press callback itself does not write pot values.
+Targets follow current host or pending UI values while pickup is pending;
+normal host takeover still handles initial screen entry. All twelve upstream
+continuous processing controls and the wrapper's Input Gain
 remain ordinary host parameters on the Performance page. Input Gain is appended
 to the underlying parameter array so every released parameter index remains
 preset-stable.
@@ -141,7 +163,7 @@ The wrapper and incorporated Capicola DSP are released under
 [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md), and the
 [source offer](SOURCE_OFFER.md).
 
-After explicit owner approval, pushing a `v*` tag runs the release workflow.
+After owner approval, pushing a `v*` tag runs the release workflow.
 It verifies the tagged commit and publishes `capicola.o` beside the complete
 corresponding-source archive.
 
@@ -157,6 +179,7 @@ unnecessarily technical:
   lifecycle
 - [Host modulation](HOST_MODULATION.md) — parameter-to-CV contract
 - [Analysis CV](ANALYSIS_CV.md) — optional output voltages and bus behavior
+- [Release notes](RELEASE_NOTES.md) — release changes and known playback limits
 - [Approved discovery Spec](APPROVED_SPEC.md) and
   [implementation gate](IMPLEMENTATION_GATE.md) — product decisions and scope
 - [License audit](LICENSE_AUDIT.md) and [source offer](SOURCE_OFFER.md) — release

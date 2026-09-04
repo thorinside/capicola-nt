@@ -115,7 +115,12 @@ public:
     }
 
     void triggerSlice() {
-        for (auto& channel : channels_) channel.SubmitRequest(capicola::Request::SLICE);
+        for (auto& channel : channels_) {
+            // Preserve the queued LIVE_EFFECT request until audio starts.
+            if (channel.GetState() == capicola::State::LIVE_EFFECT) {
+                channel.SubmitRequest(capicola::Request::SLICE);
+            }
+        }
     }
 
     bool inputTransient() const { return inputTransient_; }
@@ -157,6 +162,20 @@ public:
             for (std::size_t i = 0; i < frames; ++i) {
                 outputs[channel][i] = mix_ * outputs[channel][i] +
                                       dry * inputs[channel][i];
+            }
+        }
+
+        // Preserve upstream's stereo guard: an automatic catch-up on one side
+        // also catches the other side when their source times drift over 1 s.
+        const bool leftFired = channels_[0].FiredThisBlock();
+        const bool rightFired = channels_[1].FiredThisBlock();
+        if (leftFired != rightFired) {
+            const double leftLag = channels_[0].GridLag();
+            const double rightLag = channels_[1].GridLag();
+            const double drift = leftLag > rightLag
+                ? leftLag - rightLag : rightLag - leftLag;
+            if (drift > 48000.0) {
+                channels_[leftFired ? 1 : 0].SubmitRequest(capicola::Request::SLICE);
             }
         }
 

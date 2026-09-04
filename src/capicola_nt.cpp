@@ -22,6 +22,8 @@ constexpr float kSamplePlaybackGain = 8.0f;
 constexpr float kDspFullScaleVolts = 5.0f;
 constexpr float kNtVoltsToDsp = 1.0f / kDspFullScaleVolts;
 constexpr uint32_t kSampleTransitionRateDivisor = 20U; // 50 ms.
+constexpr uint32_t kStreamRecoveryRateDivisor = 10U; // 100 ms without progress.
+constexpr uint32_t kSourceTransitionRateDivisor = 100U; // 10 ms output bridge.
 using SourceProcessor = capicola_nt::CapicolaStereoLivePath<kRingFrames>;
 
 struct SampleStreamSpec {
@@ -193,6 +195,8 @@ struct Algorithm : public _NT_algorithm {
     SampleStreamSpec pendingSample;
     uint32_t streamSourceFrame;
     float streamSourceFraction;
+    uint32_t streamMissingFrames;
+    bool streamHasRendered;
     float sampleSpeed;
     uint32_t pendingSourceFrame;
     float pendingSourceFraction;
@@ -210,6 +214,8 @@ struct Algorithm : public _NT_algorithm {
     SourceMode activeSource;
     UiView uiView;
     bool alternateControls;
+    bool potNeedsPickup[3];
+    float previousPotPosition[3];
     int16_t pendingUiValues[kNumParameters];
     uint32_t pendingUiValueMask;
     int16_t appliedControls[ARRAY_SIZE(kPerformanceParameters)];
@@ -217,6 +223,10 @@ struct Algorithm : public _NT_algorithm {
     bool processorFaulted;
     float lastOutputLeft;
     float lastOutputRight;
+    float sourceTransitionStartLeft;
+    float sourceTransitionStartRight;
+    uint32_t sourceTransitionFrame;
+    uint32_t sourceTransitionFrames;
     float inputGain;
     float inputGainSmoothingCoefficient;
     bool inputGainInitialized;
@@ -330,6 +340,12 @@ _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& memory,
     algorithm->inputGainSmoothingCoefficient = 1.0f /
         (1.0f + 0.01f * static_cast<float>(NT_globals.sampleRate));
     algorithm->inputGainInitialized = false;
+    algorithm->sourceTransitionFrames = NT_globals.sampleRate /
+        kSourceTransitionRateDivisor;
+    if (algorithm->sourceTransitionFrames == 0U) {
+        algorithm->sourceTransitionFrames = 1U;
+    }
+    algorithm->sourceTransitionFrame = algorithm->sourceTransitionFrames;
 
     const uint32_t folderCount = algorithm->cardMounted
         ? NT_getNumSampleFolders() : 0;
@@ -486,6 +502,8 @@ bool updateSampleRange(Algorithm* algorithm) {
 void invalidateSamplePlayback(Algorithm* algorithm) {
     algorithm->streamSourceFrame = 0U;
     algorithm->streamSourceFraction = 0.0f;
+    algorithm->streamMissingFrames = 0U;
+    algorithm->streamHasRendered = false;
     algorithm->activePrefetchFrames = 0U;
     algorithm->activePrefetchOffset = 0U;
     algorithm->streamedSampleName[0] = '\0';
@@ -524,6 +542,10 @@ void stopSamplePlayback(Algorithm* algorithm) {
     invalidateSamplePlayback(algorithm);
     resetProcessor(algorithm, false);
     beginSampleTransition(algorithm, fadeOutFirst, false, oldLeft, oldRight);
+    if (fadeOutFirst) {
+        // This new fade already starts at the audible (possibly bridged) value.
+        algorithm->sourceTransitionFrame = algorithm->sourceTransitionFrames;
+    }
 }
 
 bool openStream(_NT_stream stream,
@@ -550,6 +572,8 @@ bool openSampleStream(Algorithm* algorithm, const SampleStreamSpec& spec) {
     algorithm->streamedSample = spec;
     algorithm->streamSourceFrame = 0U;
     algorithm->streamSourceFraction = 0.0f;
+    algorithm->streamMissingFrames = 0U;
+    algorithm->streamHasRendered = false;
     algorithm->activePrefetchFrames = 0U;
     algorithm->activePrefetchOffset = 0U;
     algorithm->sampleSpeed = static_cast<float>(spec.sampleRate) /
@@ -639,6 +663,8 @@ void activatePendingSampleStream(Algorithm* algorithm) {
     algorithm->streamedSample = algorithm->pendingSample;
     algorithm->streamSourceFrame = algorithm->pendingSourceFrame;
     algorithm->streamSourceFraction = algorithm->pendingSourceFraction;
+    algorithm->streamMissingFrames = 0U;
+    algorithm->streamHasRendered = true;
     algorithm->sampleSpeed = algorithm->pendingSampleSpeed;
     algorithm->activePrefetchFrames = algorithm->pendingPrefetchFrames;
     algorithm->activePrefetchOffset = 0U;
@@ -668,7 +694,9 @@ bool refreshCatalog(Algorithm* algorithm) {
     const bool mounted = NT_isSdCardMounted();
     if (mounted != algorithm->cardMounted) {
         algorithm->cardMounted = mounted;
-        stopSamplePlayback(algorithm);
+        if (algorithm->activeSource == kSourceSample) {
+            stopSamplePlayback(algorithm);
+        }
     }
 
     const uint32_t folderCount = mounted ? NT_getNumSampleFolders() : 0;
@@ -771,11 +799,23 @@ void selectSource(Algorithm* algorithm, SourceMode source) {
     if (algorithm->activeSource == source) {
         return;
     }
-    // Reset Capicola at the source boundary so no history from the replaced
-    // source is rendered after the switch.
+    // Keep the last audible voltage across the different Live/Sample gains.
+    // The engine resets immediately; only this held endpoint bridges the switch.
+    const float oldGain = algorithm->activeSource == kSourceSample
+        ? kSamplePlaybackGain : kDspFullScaleVolts;
+    const float newGain = source == kSourceSample
+        ? kSamplePlaybackGain : kDspFullScaleVolts;
+    const float oldLeft = algorithm->lastOutputLeft * (oldGain / newGain);
+    const float oldRight = algorithm->lastOutputRight * (oldGain / newGain);
     algorithm->activeSource = source;
     resetProcessor(algorithm);
     invalidateSamplePlayback(algorithm);
+    algorithm->sourceTransitionStartLeft = oldLeft;
+    algorithm->sourceTransitionStartRight = oldRight;
+    algorithm->sourceTransitionFrame = 0U;
+    // A second selection before step() must still start at the audible endpoint.
+    algorithm->lastOutputLeft = oldLeft;
+    algorithm->lastOutputRight = oldRight;
 }
 
 void parameterChanged(_NT_algorithm* base, int parameter) {
@@ -807,7 +847,6 @@ void parameterChanged(_NT_algorithm* base, int parameter) {
                 openSelectedSample(algorithm);
             } else if (algorithm->activeSource != kSourceSample) {
                 invalidateSamplePlayback(algorithm);
-                resetProcessor(algorithm);
             }
             break;
         }
@@ -1036,7 +1075,22 @@ uint32_t renderStreamedSample(Algorithm* algorithm,
             break;
         }
 
+        if (bounded != 0U) {
+            algorithm->streamHasRendered = true;
+            algorithm->streamMissingFrames = 0U;
+        }
         if (bounded == requested) break;
+        // v13 reports only a frame count, not EOF. A stream that has played
+        // but then stalls below its catalogue length may be a shorter variant.
+        // Preserve short underruns; recover after 100 ms without progress.
+        const uint32_t recoveryFrames = NT_globals.sampleRate /
+            kStreamRecoveryRateDivisor;
+        const uint32_t recoveryLimit = recoveryFrames == 0U ? 1U : recoveryFrames;
+        if (algorithm->streamHasRendered) {
+            const uint32_t missing = requested - bounded;
+            const uint32_t remaining = recoveryLimit - algorithm->streamMissingFrames;
+            algorithm->streamMissingFrames += missing < remaining ? missing : remaining;
+        }
         const float requestedAdvance = sourceFractionBefore +
             static_cast<float>(requested) * algorithm->sampleSpeed;
         const bool reachedReportedEnd =
@@ -1044,7 +1098,10 @@ uint32_t renderStreamedSample(Algorithm* algorithm,
             (std::isfinite(requestedAdvance) &&
              requestedAdvance >= static_cast<float>(
                  algorithm->streamedSample.frames - sourceFrameBefore));
-        if (!reachedReportedEnd || restartedThisBlock) break;
+        const bool stalled = algorithm->streamHasRendered &&
+            algorithm->streamMissingFrames >= recoveryLimit;
+        if (!algorithm->streamHasRendered ||
+            (!reachedReportedEnd && !stalled) || restartedThisBlock) break;
 
         const SampleStreamSpec loop = algorithm->streamedSample;
         if (!openSampleStream(algorithm, loop)) break;
@@ -1182,7 +1239,9 @@ bool processStreamedSampleBlock(Algorithm* algorithm, int frames) {
         const bool rendered = processSampleSegment(
             algorithm, offset, segmentFrames, restartedThisBlock);
         allSegmentsRendered = allSegmentsRendered && rendered;
-        applySampleTransitionGain(algorithm, offset, segmentFrames);
+        if (rendered || algorithm->sampleTransitionPhase != kSampleTransitionFadeIn) {
+            applySampleTransitionGain(algorithm, offset, segmentFrames);
+        }
         offset += segmentFrames;
     }
     return allSegmentsRendered;
@@ -1269,8 +1328,24 @@ void step(_NT_algorithm* base, float* busFrames, int numFramesBy4) {
         renderStoppedSampleFadeOut(algorithm, frames);
         rendered = false;
     } else if (!rendered) {
-        fadeToSilence(algorithm->scratchLeft, algorithm->scratchRight, frames,
-                      algorithm->lastOutputLeft, algorithm->lastOutputRight);
+        if (algorithm->sourceTransitionFrame < algorithm->sourceTransitionFrames) {
+            // The source bridge already holds the preceding output. Feeding
+            // its mixed result back into a block fade would restart the tail.
+            std::memset(algorithm->scratchLeft, 0, frames * sizeof(float));
+            std::memset(algorithm->scratchRight, 0, frames * sizeof(float));
+        } else {
+            fadeToSilence(algorithm->scratchLeft, algorithm->scratchRight, frames,
+                          algorithm->lastOutputLeft, algorithm->lastOutputRight);
+        }
+    }
+    for (int i = 0; i < frames && algorithm->sourceTransitionFrame <
+         algorithm->sourceTransitionFrames; ++i) {
+        const float gain = static_cast<float>(++algorithm->sourceTransitionFrame) /
+            static_cast<float>(algorithm->sourceTransitionFrames);
+        algorithm->scratchLeft[i] = gain * algorithm->scratchLeft[i] +
+            (1.0f - gain) * algorithm->sourceTransitionStartLeft;
+        algorithm->scratchRight[i] = gain * algorithm->scratchRight[i] +
+            (1.0f - gain) * algorithm->sourceTransitionStartRight;
     }
     algorithm->lastOutputLeft = algorithm->scratchLeft[frames - 1];
     algorithm->lastOutputRight = algorithm->scratchRight[frames - 1];
@@ -1537,9 +1612,14 @@ void customUi(_NT_algorithm* base, const _NT_uiData& data) {
         return;
     }
 
-    if (pressed(data, kNT_potButtonL) || pressed(data, kNT_potButtonC) ||
-        pressed(data, kNT_potButtonR)) {
+    const bool bankChanged = pressed(data, kNT_potButtonL) ||
+        pressed(data, kNT_potButtonC) || pressed(data, kNT_potButtonR);
+    if (bankChanged) {
         algorithm->alternateControls = !algorithm->alternateControls;
+        for (int i = 0; i < 3; ++i) {
+            algorithm->potNeedsPickup[i] = true;
+            algorithm->previousPotPosition[i] = data.pots[i];
+        }
     }
 
     const int params[2][3] = {
@@ -1549,8 +1629,20 @@ void customUi(_NT_algorithm* base, const _NT_uiData& data) {
     const uint16_t potControls[3] = {kNT_potL, kNT_potC, kNT_potR};
     const int row = algorithm->alternateControls ? 1 : 0;
     for (int i = 0; i < 3; ++i) {
-        if ((data.controls & potControls[i]) != 0) {
+        if (!bankChanged && (data.controls & potControls[i]) != 0) {
             const _NT_parameter& definition = algorithm->params[params[row][i]];
+            if (algorithm->potNeedsPickup[i]) {
+                const float target = static_cast<float>(
+                    displayedValue(algorithm, params[row][i]) - definition.min) /
+                    static_cast<float>(definition.max - definition.min);
+                const float previous = algorithm->previousPotPosition[i];
+                const float position = data.pots[i];
+                algorithm->previousPotPosition[i] = position;
+                const bool crossed = (previous <= target && position >= target) ||
+                    (previous >= target && position <= target);
+                if (!crossed && std::fabs(position - target) > 0.005f) continue;
+                algorithm->potNeedsPickup[i] = false;
+            }
             const int value = definition.min + static_cast<int>(
                 data.pots[i] * static_cast<float>(definition.max - definition.min) + 0.5f);
             setFromUi(algorithm, params[row][i], value);
@@ -1582,6 +1674,8 @@ void setupUi(_NT_algorithm* base, _NT_float3& pots) {
     };
     const int row = algorithm->alternateControls ? 1 : 0;
     for (int i = 0; i < 3; ++i) {
+        // The host re-arms its own takeover when entering the screen.
+        algorithm->potNeedsPickup[i] = false;
         const _NT_parameter& definition = algorithm->params[params[row][i]];
         pots[i] = static_cast<float>(algorithm->v[params[row][i]] - definition.min) /
                   static_cast<float>(definition.max - definition.min);

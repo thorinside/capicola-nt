@@ -18,7 +18,7 @@ Both repositories are Git submodules under `vendor/`; the gitlinks, not branch n
 
 The included user-facing processing capabilities are:
 
-- **Pitch:** -12 to +12 semitones, with zero detent.
+- **Pitch:** -12 to +12 semitones. The NT control uses 0.1-semitone steps with zero directly selectable; it does not apply the upstream panel's continuous zero-detent snap.
 - **Stretch:** real time to freeze, preserving the upstream `(1-x)^2.5` taper.
 - **Threshold:** adaptive transient ratio 0–8; the top disables automatic triggers.
 - **Grain Size:** 32–4096 keyframes.
@@ -30,9 +30,17 @@ The included user-facing processing capabilities are:
 - **Drive Character:** quake through clean to sinc.
 - **Mix:** dry to wet, retaining the upstream wet-path delay behavior.
 - **Feedback Tone:** normalized bandpass center 0.002–0.9 (about 48 Hz–21.6 kHz at 48 kHz).
-- **Slice:** momentary manual splice action.
+- **Slice:** momentary manual splice action, ignored until the engine has started processing.
 
 Every control is stereo-linked, and ordinary modulation uses NT parameter mapping. The JSON ledger records a source symbol and an NT-specific constraint for every item.
+
+The wrapper retains the upstream stereo coordination rule: if exactly one
+channel automatically fires in a block and the source-grid lags differ by more
+than 48,000 frames (one second at 48 kHz), the other channel receives a Slice.
+The two detectors remain independent below this threshold. Switching the
+custom UI's pot bank requires each pot to cross its current displayed value or
+come within 0.005 on its normalized sweep; initial screen entry retains host
+takeover.
 
 ## Audited analysis outputs
 
@@ -49,14 +57,21 @@ Accordingly, the wrapper boundary is:
 - accept only files that the NT host enumerates through its sample-folder API;
 - duplicate mono into Capicola's two processing channels and preserve stereo order;
 - reserve two API-sized per-instance stream states and buffers plus two host blocks of rendered frames rather than a full-file buffer;
-- open the current valid selection when Sample mode is entered or Folder changes, synchronize Sample to a changed folder's legal range, and loop the full stream because this source has no transport trigger;
+- open the current valid selection when Sample mode is entered or Folder changes in Sample mode, synchronize Sample to a changed folder's legal range, and loop the full stream because this source has no transport trigger; inactive Folder changes and SD mount-state refreshes leave the Live engine intact;
 - retain the refreshed catalogue metadata for validation while treating valid frames from the opened renderer as authoritative, so a longer resolved physical variant is not restarted at the catalogue entry's earlier reported boundary;
 - preserve the warm processor across a valid sample-to-sample replacement, keep the old stream audible until the pending stream returns frames, switch streams at the zero-gain midpoint of a fixed 50 ms fade-out/50 ms fade-in, and leave the exposed Fade processing control unchanged;
-- bound loop recovery to one reopen per audio block and drop the remaining frames on an unexpected short render rather than performing unbounded SD work;
+- reset the engine on a Live/Sample source switch and linearly bridge its last audible stereo voltage into the new output over 10 ms, retaining the initial Sample 50 ms fade-in;
+- after first stream progress, permit a loop reopen on a short render at or beyond the reported boundary, or recover an earlier stall after 100 ms of missing host frames; reset the missing-frame count on any progress, reopen, or handoff, and never reopen initial loading before its first progress;
+- bound recovery to one reopen per audio block and leave unavailable frames silent rather than performing unbounded SD work;
 - leave unsupported/unreadable resources to host error behavior; and
 - add no recording, reverse, scrubbing, start/end editing, chopping, polyphony, source mixing, hidden file substitution, loop-point editing, or loop-boundary crossfade.
 
 The SDK header does not promise that every file with a `.wav` suffix is accepted, so this project does not make that broader claim.
+
+API v13 supplies no separate EOF status. A shorter physical variant can
+therefore have a 100 ms gap before restarting, and an underrun lasting at least
+100 ms can restart playback. The recovery policy does not guarantee seamless
+EOF or loop boundaries.
 
 ## Deliberate exclusions
 

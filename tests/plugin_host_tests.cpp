@@ -41,6 +41,7 @@ uint32_t gOpenedFolder = 0;
 uint32_t gOpenedSample = 0;
 uint32_t gStreamInitialEmptyRenders = 0;
 uint32_t gOpenedStreamFrameCount = 0;
+bool gConstantSample = false;
 _NT_algorithm* gAlgorithm = nullptr;
 const _NT_factory* gFactory = nullptr;
 struct HostStreamState {
@@ -221,6 +222,9 @@ extern "C" uint32_t NT_streamRender(_NT_stream stream,
             : 0.35f * std::sin(
                 2.0f * kPi * 710.0f * state->sourcePosition /
                 static_cast<float>(sourceRate));
+        if (gConstantSample) {
+            renderBuffer[rendered][0] = renderBuffer[rendered][1] = 0.5f;
+        }
         state->sourcePosition += speed;
     }
     gStreamClock = state->clock;
@@ -256,6 +260,289 @@ void NT_drawText(int x, int, const char* text, int,
                  _NT_textAlignment, _NT_textSize size) {
     gDrawnText.push_back({text == nullptr ? "" : text, x, size});
 }
+
+namespace {
+
+// Exercise the exported plug-in callbacks with a fresh host-owned instance.
+// Only the external NT catalogue, streaming service, and controls are simulated.
+struct HostPlugin {
+    const _NT_factory* factory;
+    _NT_algorithmRequirements requirements{};
+    std::vector<uint8_t> sram, dram, dtc;
+    std::vector<int16_t> values;
+    std::vector<float> buses;
+    _NT_algorithm* algorithm;
+
+    HostPlugin() : factory(reinterpret_cast<const _NT_factory*>(
+        pluginEntry(kNT_selector_factoryInfo, 0))) {
+        gCardMounted = true;
+        gNumFolders = 2;
+        gDrumsSampleCount = 2;
+        gSampleFrameCount = 48000;
+        gOpenedStreamFrameCount = 0;
+        gConstantSample = false;
+        gSampleMetadataSupported = true;
+        gStreamOpenSucceeds = true;
+        gStreamInitialEmptyRenders = 0;
+        gDeferParameterUiCommit = false;
+        factory->calculateRequirements(requirements, nullptr);
+        sram.resize(requirements.sram);
+        dram.resize(requirements.dram);
+        dtc.resize(requirements.dtc);
+        const _NT_algorithmMemoryPtrs memory{
+            sram.data(), dram.data(), dtc.data(), nullptr};
+        algorithm = factory->construct(memory, requirements, nullptr);
+        values.resize(requirements.numParameters);
+        for (uint32_t i = 0; i < requirements.numParameters; ++i) {
+            values[i] = algorithm->parameters[i].def;
+        }
+        algorithm->v = values.data();
+        buses.resize(kNT_lastBus * kFrames);
+        activate();
+        set("Left output mode", 1);
+        set("Right output mode", 1);
+    }
+
+    void activate() { gAlgorithm = algorithm; gFactory = factory; }
+    int parameter(const char* name) const {
+        return findParameter(algorithm, requirements.numParameters, name);
+    }
+    void set(const char* name, int value) {
+        activate();
+        const int p = parameter(name);
+        values[p] = static_cast<int16_t>(value);
+        factory->parameterChanged(algorithm, p);
+    }
+    void step() {
+        activate();
+        factory->step(algorithm, buses.data(), kFrames / 4);
+    }
+    void ui(const _NT_uiData& event) {
+        activate();
+        factory->customUi(algorithm, event);
+    }
+    float output(int frame, int channel = 0) const {
+        return buses[(12 + channel) * kFrames + frame];
+    }
+};
+
+bool testInactiveFolderPreservesLiveAudio() {
+    HostPlugin uninterrupted, browsing;
+    for (HostPlugin* plugin : {&uninterrupted, &browsing}) {
+        plugin->set("Right input", 0);
+        plugin->set("Stretch", 80);
+        plugin->set("Threshold", 100);
+        plugin->set("Drive Character", 5000);
+        plugin->set("Grain Size", 4096);
+        plugin->set("Feedback", 50);
+    }
+    for (int block = 0; block < 532; ++block) {
+        if (block == 500) browsing.set("Folder", 1);
+        if (block == 510 || block == 520) {
+            gCardMounted = block == 520;
+            browsing.set("Folder", 0);
+        }
+        for (int i = 0; i < kFrames; ++i) {
+            const float input = 3.0f * std::sin(
+                2.0f * kPi * 220.0f * (block * kFrames + i) / 48000.0f);
+            uninterrupted.buses[i] = browsing.buses[i] = input;
+        }
+        uninterrupted.step();
+        browsing.step();
+        for (int i = 0; i < kFrames; ++i) {
+            if (uninterrupted.output(i) != browsing.output(i)) return false;
+        }
+    }
+    return true;
+}
+
+bool testPotBankRequiresPickup() {
+    HostPlugin plugin;
+    _NT_uiData event{};
+    event.controls = kNT_potL;
+    plugin.ui(event); // MAIN: Stretch at its physical minimum.
+    event = {};
+    event.controls = kNT_potButtonL | kNT_potL;
+    event.pots[0] = 0.001f;
+    event.pots[1] = 0.8f;
+    plugin.ui(event); // Press jitter must not write ALT Pitch.
+    if (plugin.values[plugin.parameter("Pitch")] != 0) return false;
+    event.controls = kNT_potL;
+    event.pots[0] = 0.1f;
+    plugin.ui(event);
+    if (plugin.values[plugin.parameter("Pitch")] != 0) return false;
+    event.pots[0] = 0.6f; // Cross the saved midpoint in one update.
+    plugin.ui(event);
+    if (plugin.values[plugin.parameter("Pitch")] != 24) return false;
+    event.pots[0] = 0.7f;
+    plugin.ui(event);
+    if (plugin.values[plugin.parameter("Pitch")] != 48) return false;
+    event.controls = kNT_potC;
+    event.pots[1] = 0.9f; // Other pots remain independently locked.
+    plugin.ui(event);
+    if (plugin.values[plugin.parameter("Grain Size")] != 128) return false;
+    event.controls = kNT_potButtonC;
+    plugin.ui(event);
+    event.controls = kNT_potL;
+    event.pots[0] = 0.6f;
+    plugin.ui(event); // Switching back must pick up MAIN again.
+    if (plugin.values[plugin.parameter("Stretch")] != 0) return false;
+    event.pots[0] = 0.0f;
+    plugin.ui(event);
+    event.pots[0] = 0.1f;
+    plugin.ui(event);
+    return plugin.values[plugin.parameter("Stretch")] == 10;
+}
+
+bool testShorterPhysicalSamplesKeepLooping() {
+    for (uint32_t actualFrames : {128U, 149U}) {
+        HostPlugin plugin;
+        gSampleFrameCount = 4096;
+        gOpenedStreamFrameCount = actualFrames;
+        plugin.set("Mix", 0);
+        plugin.set("Source", 1);
+        double lateEnergy = 0.0;
+        for (int block = 0; block < 320; ++block) {
+            plugin.step();
+            if (block >= 150) {
+                for (int i = 0; i < kFrames; ++i) {
+                    lateEnergy += std::fabs(plugin.output(i));
+                }
+            }
+        }
+        if (lateEnergy < 100.0) return false;
+    }
+    return true;
+}
+
+bool testSmallSampleCanWaitForItsFirstFrames() {
+    HostPlugin plugin;
+    gSampleFrameCount = 16;
+    gStreamInitialEmptyRenders = 100;
+    plugin.set("Mix", 0);
+    plugin.set("Source", 1);
+    double energy = 0.0;
+    for (int block = 0; block < 250; ++block) {
+        plugin.step();
+        for (int i = 0; i < kFrames; ++i) energy += std::fabs(plugin.output(i));
+    }
+    return energy > 1.0;
+}
+
+bool testSourceChangesPreserveOutputContinuity() {
+    HostPlugin plugin;
+    plugin.set("Mix", 0);
+    // A sustained voltage isolates the switching discontinuity from waveform slew.
+    std::fill(plugin.buses.begin(), plugin.buses.begin() + 2 * kFrames, 4.0f);
+    plugin.step();
+    float previous = plugin.output(kFrames - 1);
+    plugin.set("Source", 1);
+    plugin.step();
+    if (std::fabs(plugin.output(0) - previous) > 0.05f) return false;
+    for (int block = 0; block < 100; ++block) plugin.step();
+    previous = plugin.output(kFrames - 1);
+    std::fill(plugin.buses.begin(), plugin.buses.begin() + 2 * kFrames, -4.0f);
+    plugin.set("Source", 0);
+    plugin.step();
+    if (std::fabs(plugin.output(0) - previous) > 0.05f) return false;
+    for (int block = 0; block < 10; ++block) plugin.step();
+    if (plugin.output(kFrames - 1) != -4.0f) return false;
+    // Two selections before the next audio block still start at the audible voltage.
+    plugin.set("Source", 1);
+    plugin.set("Source", 0);
+    plugin.step();
+    return std::fabs(plugin.output(0) + 4.0f) < 0.05f;
+}
+
+bool testSourceBridgeRemainsSmoothWhileSampleWaits() {
+    for (bool makeUnavailable : {false, true}) {
+        HostPlugin plugin;
+        plugin.set("Mix", 0);
+        std::fill(plugin.buses.begin(), plugin.buses.begin() + 2 * kFrames, 4.0f);
+        plugin.step();
+        gStreamInitialEmptyRenders = 100;
+        plugin.set("Source", 1);
+        float previous = 4.0f;
+        for (int block = 0; block < 60; ++block) {
+            if (makeUnavailable && block == 1) plugin.set("Folder", 99);
+            plugin.step();
+            for (int i = 0; i < kFrames; ++i) {
+                const float sample = plugin.output(i);
+                if (sample > previous || std::fabs(sample - previous) > 0.05f) return false;
+                previous = sample;
+            }
+        }
+        if (previous != 0.0f) return false;
+    }
+    return true;
+}
+
+bool testBriefUnderrunsResumeAtTheSameAudioFrame() {
+    HostPlugin paused, interrupted;
+    for (HostPlugin* plugin : {&paused, &interrupted}) {
+        plugin->set("Mix", 0);
+        plugin->set("Source", 1);
+    }
+    for (int block = 0; block < 100; ++block) {
+        paused.step();
+        interrupted.step();
+    }
+    for (int interruption = 0; interruption < 4; ++interruption) {
+        gCardMounted = false;
+        for (int block = 0; block < 40; ++block) interrupted.step();
+        gCardMounted = true;
+        paused.step();
+        interrupted.step();
+        for (int i = 0; i < kFrames; ++i) {
+            if (paused.output(i) != interrupted.output(i)) return false;
+        }
+    }
+    return true;
+}
+
+bool testSliceDuringSdStartupPreservesWetAudio() {
+    HostPlugin reference, sliced;
+    gStreamInitialEmptyRenders = 100;
+    for (HostPlugin* plugin : {&reference, &sliced}) {
+        plugin->set("Pitch", 120);
+        plugin->set("Source", 1);
+    }
+    double energy = 0.0;
+    for (int block = 0; block < 400; ++block) {
+        if (block == 50) {
+            _NT_uiData event{};
+            event.controls = kNT_encoderButtonR;
+            sliced.ui(event);
+        }
+        reference.step();
+        sliced.step();
+        for (int i = 0; i < kFrames; ++i) {
+            if (reference.output(i) != sliced.output(i)) return false;
+            energy += std::fabs(sliced.output(i));
+        }
+    }
+    return energy > 100.0;
+}
+
+bool testDelayedSampleFadesFromItsFirstAudibleFrame() {
+    HostPlugin plugin;
+    gConstantSample = true;
+    gStreamInitialEmptyRenders = 100;
+    plugin.set("Mix", 0);
+    plugin.set("Source", 1);
+    for (int block = 0; block < 100; ++block) plugin.step();
+    plugin.step();
+    float previous = 0.0f;
+    for (int i = 0; i < kFrames; ++i) {
+        const float sample = plugin.output(i);
+        if (sample < previous || sample - previous > 0.01f) return false;
+        previous = sample;
+    }
+    for (int block = 0; block < 80; ++block) plugin.step();
+    return previous > 0.0f && plugin.output(kFrames - 1) == 4.0f;
+}
+
+} // namespace
 
 int main() {
     const auto* factory = reinterpret_cast<const _NT_factory*>(
@@ -494,9 +781,12 @@ int main() {
     }
     ui = {};
     ui.controls = kNT_potButtonL;
+    ui.pots[0] = 1.0f;
     factory->customUi(algorithm, ui);
     ui = {};
     ui.controls = kNT_potL;
+    ui.pots[0] = 0.5f; // Pick up ALT Pitch's saved centre before adjusting it.
+    factory->customUi(algorithm, ui);
     ui.pots[0] = 0.75f;
     factory->customUi(algorithm, ui);
     if (values[pitch] != 60) {
@@ -1528,6 +1818,33 @@ int main() {
         return fail("folder selection is not named through the NT interface");
     }
 
+    if (!testInactiveFolderPreservesLiveAudio()) {
+        return fail("browsing an inactive sample folder disrupted live audio");
+    }
+    if (!testPotBankRequiresPickup()) {
+        return fail("switching pot banks changed a control before pickup");
+    }
+    if (!testShorterPhysicalSamplesKeepLooping()) {
+        return fail("shorter physical sample variants stopped instead of looping");
+    }
+    if (!testSmallSampleCanWaitForItsFirstFrames()) {
+        return fail("delayed startup repeatedly reopened a small sample before playback");
+    }
+    if (!testSourceChangesPreserveOutputContinuity()) {
+        return fail("changing Live/Sample introduced a full-level output discontinuity");
+    }
+    if (!testSourceBridgeRemainsSmoothWhileSampleWaits()) {
+        return fail("source bridge clicked between blocks while Sample waited");
+    }
+    if (!testBriefUnderrunsResumeAtTheSameAudioFrame()) {
+        return fail("brief underruns restarted or advanced the sample incorrectly");
+    }
+    if (!testSliceDuringSdStartupPreservesWetAudio()) {
+        return fail("Slice during SD startup bypassed wet processing");
+    }
+    if (!testDelayedSampleFadesFromItsFirstAudibleFrame()) {
+        return fail("delayed sample startup consumed its fade before audio arrived");
+    }
     std::printf("plugin host live/sample path: ok\n");
     return 0;
 }
