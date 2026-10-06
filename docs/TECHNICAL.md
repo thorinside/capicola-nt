@@ -127,41 +127,32 @@ position. All presets then use the new bipolar rates and CV behavior; there is
 no stored old taper or compatibility interpretation. Host mapping settings are
 left in place and now operate on the new parameter definitions.
 
-Deserialization only records the format. Conversion is deferred to `step()`
-so custom-state restoration can precede or follow parameter restoration.
-The new ranges contain every old raw value, avoiding premature host clipping.
-One host setter is issued per outstanding request; the tested host can commit
-immediately or on a later block.
-During a pending write the same new rate calculation uses the converted target
-plus the current raw mapping offset. A save during that brief transition also
-writes `migrationPitchTarget` and/or `migrationStretchTarget`; reload completes
-those writes without converting twice. Explicit format 1 can also carry these
-native targets when an edit happens before the other old parameter is converted.
-That edited parameter skips the old range conversion. Desired targets, observed
-base values and outstanding submitted values are tracked separately. An old
-write acknowledgment retains a newer target and schedules a correcting write;
-mapped effective-only changes do not replace the target. After conversion and
-all pending writes complete, only the format marker remains. No public mode or
-extra parameter is added.
+Deserialization records only the format version and performs no host reads or
+setters. Parameter and custom-state restoration both finish before the plug-in
+operates. At the first valid `step()`, before DSP processing, the wrapper reads
+both saved BASE values and writes their converted values with
+`NT_setParameterFromAudio()`. It marks version 2 before the setter callbacks,
+so notifications cannot trigger a second conversion. If the slot is unavailable,
+processing stays inactive and initialization waits for a valid slot. Subsequent
+blocks and edits use ordinary native parameters. Presets store only the version
+marker; there are no temporary target fields, acknowledgments or migration mode.
 
-The pinned SDK does not specify whether an old preset without custom data
-always invokes `deserialise()`, or formally guarantee that all parameter
-restoration completes before the first audio step. The migration tests exercise
-both restore orders and absent custom data under that hook contract. Actual
-firmware 1.16.0 preset loading has not been verified on hardware.
+The inactive-load lifecycle is a platform constraint supplied by the owner for
+this update. The pinned SDK explicitly permits the audio setter in `step()` and
+`parameterChanged()`, while the latter does not signal completed restoration.
+The SDK does not specify parameter availability or generic/custom ordering inside
+`deserialise()`, so first-step initialization avoids early reads and a later
+restore overwriting the conversion. The local nt_enosc implementation also
+records removal of UI-setter migration inside deserialization as unsafe; it does
+not establish the exact cause.
 
-The generic parameter callback supplies no origin or request identifier. Any
-BASE observation equal to an outstanding submitted value can be mistaken for
-that write's acknowledgment, including an explicit custom UI edit. Review
-reproduced queued Pitch 10000, UI edit 10000, UI edit -5000, then the old queued
-10000 arriving and overwriting the newer edit without a correction. Generic
-restoration before the first migration step is also indistinguishable from an
-ordinary edit. The tested deferred-write model handles the two corrected
-different-value races, but cannot establish reliable acknowledgment for this
-matching-value sequence. Automatic migration is not publication-ready without
-a verified firmware completion/ordering contract, absent-data invocation, and
-restoration boundary. Value polling and a guessed block delay cannot supply
-those guarantees.
+Recognition of an original preset assumes the loader invokes `deserialise()`
+with absent/unversioned custom state. This convention is handled by the wrapper
+and native tests, but the public SDK does not explicitly state absent-data
+invocation. The owner's lifecycle constraint and SDK callback permissions are
+separate evidence. No actual firmware preset load or listening test was performed.
+The previously simulated operation-during-loading and arbitrarily delayed audio
+setter queue are not established firmware behavior and are not release blockers.
 
 The transient adapter follows upstream v1.0's event semantics. An accepted
 natural slice or valid manual Slice fires one block-quantized input pulse;
@@ -217,9 +208,9 @@ overlay, including reverse grid movement, backward-head fade completion,
 back-edge re-anchoring, direction-change bounds, detector holdoff and small-ring
 fuzz. Factory tests check the 26 metadata/page positions, one-time conversion of
 old values, both custom-state/parameter restore orders, new mapped-rate behavior
-in both sources, immediate/deferred host writes, versioned save/reload, malformed
-custom data, edits and saves before first audio, newer edits during queued
-migration writes, source transitions and pulse boundaries. These are host tests;
+in both sources, BASE versus mapped values, common parameter offsets, exactly-once
+initialization, versioned save/reload, malformed custom data, native edits after
+initialization, source transitions and pulse boundaries. These are host tests;
 physical firmware preset loading and listening remain unverified.
 
 To prepare both public release assets:

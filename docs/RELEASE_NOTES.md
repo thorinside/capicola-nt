@@ -1,6 +1,6 @@
 # Capicola for disting NT release notes
 
-## v0.6.1 (held candidate)
+## v0.6.1 (candidate)
 
 Simplifies the upstream v1.0 controls by reusing **Pitch** and **Stretch** in
 their original parameter slots 9 and 10. Both now range from -100% to +100%
@@ -15,24 +15,22 @@ taper `sign(x) * abs(x)^2.5`. Forward unity is Pitch +50%, Stretch +100%.
   maps linearly to -100…+100%. Old center Pitch becomes Hold, while old Stretch
   0/50/100 becomes reverse/freeze/forward. Converted presets use the new sound
   and CV response.
-- Defers base-value conversion to the first audio step. The custom-data hook
-  performs no parameter reads or host setters. Conversion supports both restore
-  orders under the stated first-step assumption, pending host commits, and
-  save/reload without a second conversion. Explicit edits before first audio
-  retain their new values; older queued migration writes retain newer targets
-  and trigger correcting writes after acknowledgment in the tested host model.
+- Initializes converted BASE values at the first valid audio callback, before
+  DSP processing begins. Parameter and custom-state loading have completed by
+  that point. Deserialization records the format without host reads or setters.
+  Conversion happens once; saved format2 presets and later edits use native
+  bipolar values. Presets store only the version marker.
 - Retains the upstream v1.0 DSP fixes and event-based transient outputs from
   v0.6.0. v0.6.0 preset compatibility is explicitly outside this update's scope;
   its published tag and assets remain intact.
 
-Validation: strict host DSP and factory integration suites, migration and new
-CV regressions, capability/license audits, and an inspected Cortex-M7 ARM
-object. Firmware 1.16.0, API v13 and 48 kHz remain the baseline. Physical NT
-preset loading and listening have not been performed. Publication is held:
-the SDK does not establish absent-data invocation, completed restoration before
-audio, or reliable setter acknowledgment. A matching-value edit can be mistaken
-for a queued write's acknowledgment and allow that write to overwrite a newer
-edit. The technical reference records this reproduced limitation.
+Validation: strict host DSP and factory integration suites, both restoration
+orders before operation, one-time range conversion, mapped CV and save/reload
+regressions, capability/license audits, and an inspected Cortex-M7 ARM object.
+Firmware 1.16.0, API v13 and 48 kHz remain the baseline. Physical NT preset loading
+and listening have not been performed. The technical reference distinguishes the
+owner-supplied inactive-load lifecycle from the SDK's callback permissions and
+records the absent-custom-state callback convention.
 
 ## v0.6.0
 

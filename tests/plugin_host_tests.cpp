@@ -50,12 +50,10 @@ bool gConstantSample = false;
 _NT_algorithm* gAlgorithm = nullptr;
 const _NT_factory* gFactory = nullptr;
 bool gSlotAvailable = true;
-bool gDeferAudioCommit = false;
 uint32_t gAudioParameterWrites = 0;
 uint32_t gSlotReads = 0;
 uint32_t gParameterOffset = 0;
-struct AudioWrite { _NT_algorithm* algorithm; uint32_t parameter; int16_t value; };
-std::vector<AudioWrite> gAudioWrites;
+uint32_t gLastAudioParameter = 0;
 struct JsonMember { std::string name; int value; bool numeric = true; };
 struct HostJson {
     bool object = true;
@@ -292,11 +290,8 @@ void commitHostParameter(_NT_algorithm* algorithm, uint32_t parameter, int16_t v
 
 extern "C" void NT_setParameterFromAudio(uint32_t, uint32_t parameter, int16_t value) {
     ++gAudioParameterWrites;
-    if (gDeferAudioCommit) {
-        gAudioWrites.push_back({gAlgorithm, parameter, value});
-    } else {
-        commitHostParameter(gAlgorithm, parameter, value);
-    }
+    gLastAudioParameter = parameter;
+    commitHostParameter(gAlgorithm, parameter, value);
 }
 
 extern "C" void NT_setParameterFromUi(uint32_t, uint32_t parameter, int16_t value) {
@@ -379,9 +374,7 @@ struct HostPlugin {
         gStreamInitialEmptyRenders = 0;
         gDeferParameterUiCommit = false;
         gSlotAvailable = true;
-        gDeferAudioCommit = false;
         gParameterOffset = 0;
-        gAudioWrites.clear();
         factory->calculateRequirements(requirements, nullptr);
         sram.resize(requirements.sram);
         dram.resize(requirements.dram);
@@ -584,9 +577,6 @@ bool testPresetFormatRoundTripsAndRejectsMalformedData() {
         HostJson missing;
         missing.object = false;
         if (!legacy.restore(missing)) return false;
-        // Saving before audio retains the original format marker.
-        HostJson before = legacy.save();
-        if (before.members.size() != 1 || before.members[0].value != 1) return false;
         legacy.step();
         saved = legacy.save();
         if (saved.members.size() != 1 || saved.members[0].value != 2 ||
@@ -619,19 +609,23 @@ bool testPresetFormatRoundTripsAndRejectsMalformedData() {
         {true, {{"capicolaFormatVersion", 0}}, ""},
         {true, {{"capicolaFormatVersion", 2, false}}, ""},
         {true, {{"capicolaFormatVersion", 2}, {"capicolaFormatVersion", 2}}, ""},
-        {true, {{"capicolaFormatVersion", 2}, {"migrationPitchTarget", 10001}}, ""},
-        {true, {{"capicolaFormatVersion", 2}, {"migrationStretchTarget", -10001}}, ""},
-        {true, {{"migrationPitchTarget", 0}}, ""},
+        {true, {{"capicolaFormatVersion", 999}}, ""},
+        {true, {{"capicolaFormatVersion", 1}, {"capicolaFormatVersion", 2}}, ""},
     };
     for (HostJson json : malformed) {
-        if (fresh.restore(json, true) || fresh.save().members.size() != 1) return false;
+        if (fresh.restore(json, true)) return false;
+        const HostJson unchanged = fresh.save();
+        if (unchanged.members.size() != 1 || unchanged.members[0].value != 2)
+            return false;
     }
     HostJson withUnknown{true, {{"futureField", 123, false}, {"capicolaFormatVersion", 2}}, ""};
     return fresh.restore(withUnknown, true);
 }
 
-bool testDeferredMigrationUsesBaseValuesAndCommonOffset() {
+bool testMigrationUsesBaseValuesAndCommonOffset() {
     HostPlugin plugin(false), reference(false);
+    // Loading restores BASE and custom data while the plugin is inactive.
+    // The first valid step initializes the ranges before normal processing.
     plugin.set("Pitch", 35);
     plugin.set("Stretch", 20);
     HostJson unversioned;
@@ -642,49 +636,26 @@ bool testDeferredMigrationUsesBaseValuesAndCommonOffset() {
     reference.set("Stretch", capicola_nt::stretchValueFromLegacy(20));
     reference.map("Pitch", 30);
     reference.map("Stretch", 10);
-    int block = 0;
-    const auto compareStep = [&]() {
+    gParameterOffset = 7;
+    const uint32_t writes = gAudioParameterWrites;
+    for (int block = 0; block < 24; ++block) {
         for (int i = 0; i < kFrames; ++i) {
             plugin.buses[i] = reference.buses[i] = 3.0f * std::sin(
                 2.0f * kPi * 237.0f * (block * kFrames + i) / 48000.0f);
         }
-        plugin.step(); reference.step(); ++block;
+        plugin.step(); reference.step();
+        if (gAudioParameterWrites != writes + 2 || gLastAudioParameter != 17 ||
+            plugin.baseValues[9] != capicola_nt::pitchValueFromLegacy(35) ||
+            plugin.baseValues[10] != -6000 || plugin.values[9] != 2947 ||
+            plugin.values[10] != -5990) return false;
         for (int i = 0; i < kFrames; ++i) {
             if (plugin.output(i) != reference.output(i) ||
                 plugin.output(i, 1) != reference.output(i, 1)) return false;
         }
-        return true;
-    };
-    gDeferAudioCommit = true;
-    gParameterOffset = 7;
-    const uint32_t writes = gAudioParameterWrites;
-    for (int i = 0; i < 24; ++i) if (!compareStep()) return false;
-    if (gAudioParameterWrites != writes + 2 || gAudioWrites.size() != 2 ||
-        gAudioWrites[0].parameter != 16 || gAudioWrites[1].parameter != 17 ||
-        plugin.baseValues[9] != 35 || plugin.baseValues[10] != 20) return false;
-    HostJson midway = plugin.save();
-    if (midway.members.size() != 3 || midway.members[0].value != 2) return false;
-    // Commit separately, with another audio step between the two host writes.
-    for (const AudioWrite& write : gAudioWrites) {
-        commitHostParameter(write.algorithm, write.parameter, write.value);
-        if (!compareStep()) return false;
     }
-    gAudioWrites.clear();
-    gDeferAudioCommit = false;
     gParameterOffset = 0;
-    if (plugin.baseValues[9] != capicola_nt::pitchValueFromLegacy(35) ||
-        plugin.baseValues[10] != -6000 ||
-        plugin.values[9] != plugin.baseValues[9] + 30 ||
-        plugin.values[10] != -5990 || gAudioParameterWrites != writes + 2 ||
-        plugin.save().members.size() != 1) return false;
-    // A preset saved while migration writes are pending can finish after reload.
-    HostPlugin restored(false);
-    restored.set("Pitch", 35);
-    restored.set("Stretch", 20);
-    if (!restored.restore(midway, true)) return false;
-    restored.step();
-    return restored.baseValues[9] == capicola_nt::pitchValueFromLegacy(35) &&
-           restored.baseValues[10] == -6000 && restored.save().members.size() == 1;
+    const HostJson saved = plugin.save();
+    return saved.members.size() == 1 && saved.members[0].value == 2;
 }
 
 bool testBipolarMappedValuesApplyWithoutCallbacks() {
@@ -726,62 +697,17 @@ bool testBipolarMappedValuesApplyWithoutCallbacks() {
     return true;
 }
 
-bool testNewUiEditBeforeAudioSurvivesMigrationAndSaveReload() {
-    for (const char* control : {"Pitch", "Stretch"}) {
-      for (bool deferUi : {false, true}) {
-        HostPlugin edited(false), restored(false);
-        edited.set("Pitch", 35);
-        edited.set("Stretch", 70);
-        HostJson unversioned;
-        if (!edited.restore(unversioned, true)) return false;
-        if (std::strcmp(control, "Pitch") == 0) {
-            _NT_uiData bank{};
-            bank.controls = kNT_potButtonL;
-            edited.ui(bank);
-        }
-        gDeferParameterUiCommit = deferUi;
-        _NT_uiData edit{};
-        edit.controls = kNT_potL;
-        edit.pots[0] = 0.75f;
-        edited.ui(edit); // Explicit NEW +50%, raw5000.
-        HostJson beforeAudio = edited.save();
-        restored.values = edited.values;
-        restored.baseValues = edited.baseValues;
-        if (!restored.restore(beforeAudio, true)) return false;
-        restored.step();
-        const int changed = edited.parameter(control);
-        const int other = changed == 9 ? 10 : 9;
-        const int otherTarget = other == 9 ? 2917 : 4000;
-        if (restored.baseValues[changed] != 5000 ||
-            restored.baseValues[other] != otherTarget ||
-            restored.save().members.size() != 1) return false;
-        edited.step();
-        gDeferParameterUiCommit = false;
-        if (deferUi) {
-            edited.activate();
-            commitHostParameter(edited.algorithm,
-                static_cast<uint32_t>(gPendingParameter), gPendingParameterValue);
-            gPendingParameter = -1;
-            edited.step();
-        }
-        if (edited.baseValues[changed] != 5000 ||
-            edited.baseValues[other] != otherTarget ||
-            edited.save().members.size() != 1) return false;
-      }
-    }
-    return true;
-}
-
-bool testDeferredMigrationRetainsNewerEdits() {
+bool testEditsAfterMigrationRemainNative() {
     for (bool useCustomUi : {false, true}) {
         HostPlugin edited(false), restored(false);
-        edited.set("Pitch", 35);
-        edited.set("Stretch", 70);
+        edited.set("Pitch", 120);
+        edited.set("Stretch", 100);
         HostJson unversioned;
         if (!edited.restore(unversioned, true)) return false;
-        gDeferAudioCommit = true;
-        edited.step();
-        if (gAudioWrites.size() != 2) return false;
+        const uint32_t writes = gAudioParameterWrites;
+        edited.step(); // Parameter loading is complete before operation.
+        if (edited.baseValues[9] != 10000 || edited.baseValues[10] != 10000 ||
+            gAudioParameterWrites != writes + 2) return false;
         if (useCustomUi) {
             _NT_uiData bank{};
             bank.controls = kNT_potButtonL;
@@ -789,49 +715,27 @@ bool testDeferredMigrationRetainsNewerEdits() {
             edited.ui(bank);
             _NT_uiData edit{};
             edit.controls = kNT_potL;
+            edit.pots[0] = 1.0f;
+            edited.ui(edit); // Same value as the completed conversion.
             edit.pots[0] = 0.25f;
-            edited.ui(edit); // Cross the saved target to NEW -50%, raw-5000.
+            edited.ui(edit); // New native raw-5000.
         } else {
+            edited.set("Pitch", 10000);
             edited.set("Pitch", -5000);
         }
-        edited.map("Pitch", 200); // CV changes must not replace the new base.
+        edited.map("Pitch", 200);
         edited.step();
-        if (gAudioWrites.size() != 2) return false; // One outstanding write each.
-        HostJson whileOldWritePending = edited.save();
+        if (edited.baseValues[9] != -5000 || edited.values[9] != -4800 ||
+            gAudioParameterWrites != writes + 2) return false;
+        HostJson saved = edited.save();
+        if (saved.members.size() != 1 || saved.members[0].value != 2) return false;
         restored.values = edited.values;
         restored.baseValues = edited.baseValues;
-        if (!restored.restore(whileOldWritePending, true)) return false;
-        // Commit only the original requests, including the now-stale Pitch.
-        const std::vector<AudioWrite> oldWrites = gAudioWrites;
-        gAudioWrites.clear();
-        for (const AudioWrite& write : oldWrites) {
-            edited.activate();
-            commitHostParameter(write.algorithm, write.parameter, write.value);
-        }
-        HostJson afterOldWrite = edited.save();
-        edited.step(); // Issue one correcting request for the newer base.
-        if (gAudioWrites.size() != 1 || gAudioWrites[0].parameter != 9 ||
-            gAudioWrites[0].value != -5000) return false;
-        const AudioWrite correction = gAudioWrites[0];
-        gAudioWrites.clear();
-        commitHostParameter(correction.algorithm, correction.parameter, correction.value);
-        edited.step();
-        gDeferAudioCommit = false;
-        if (edited.baseValues[9] != -5000 || edited.values[9] != -4800 ||
-            edited.baseValues[10] != 4000 || edited.save().members.size() != 1)
-            return false;
+        if (!restored.restore(saved, true)) return false;
         restored.step();
         if (restored.baseValues[9] != -5000 || restored.values[9] != -4800 ||
-            restored.baseValues[10] != 4000 || restored.save().members.size() != 1)
-            return false;
-        HostPlugin savedAfterStaleAck(false);
-        savedAfterStaleAck.set("Pitch", 2917);
-        savedAfterStaleAck.set("Stretch", 4000);
-        if (!savedAfterStaleAck.restore(afterOldWrite, true)) return false;
-        savedAfterStaleAck.step();
-        if (savedAfterStaleAck.baseValues[9] != -5000 ||
-            savedAfterStaleAck.baseValues[10] != 4000 ||
-            savedAfterStaleAck.save().members.size() != 1) return false;
+            restored.baseValues[10] != 10000 ||
+            gAudioParameterWrites != writes + 2) return false;
     }
     return true;
 }
@@ -2447,14 +2351,11 @@ int main() {
     if (!testPresetFormatRoundTripsAndRejectsMalformedData()) {
         return fail("preset format roundtrip or transactional validation failed");
     }
-    if (!testDeferredMigrationUsesBaseValuesAndCommonOffset()) {
-        return fail("deferred preset migration changed a mapped base or common offset");
+    if (!testMigrationUsesBaseValuesAndCommonOffset()) {
+        return fail("preset initialization changed a mapped base or common offset");
     }
-    if (!testNewUiEditBeforeAudioSurvivesMigrationAndSaveReload()) {
-        return fail("new UI edit before audio was converted again or lost on save/reload");
-    }
-    if (!testDeferredMigrationRetainsNewerEdits()) {
-        return fail("deferred migration overwrote a newer edit or its saved intent");
+    if (!testEditsAfterMigrationRemainNative()) {
+        return fail("edits after initialization were converted again or lost on reload");
     }
     if (!testBipolarMappedValuesApplyWithoutCallbacks()) {
         return fail("bipolar mapped controls failed in Live or Sample");
