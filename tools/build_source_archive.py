@@ -116,7 +116,7 @@ def main() -> None:
             f"{PREFIX}/docs/LICENSE_AUDIT.md",
             f"{PREFIX}/docs/SOURCE_OFFER.md",
             f"{PREFIX}/include/capicola_nt/int64_to_double.h",
-            f"{PREFIX}/include/capicola_nt/bipolar_mapping.h",
+            f"{PREFIX}/include/capicola_nt/preset_format.h",
             f"{PREFIX}/patches/capicola/0001-avoid-int64-double-runtime-helper.patch",
             f"{PREFIX}/patches/capicola/0002-make-ring-reset-constant-time.patch",
             f"{PREFIX}/patches/capicola/0003-bound-sparse-window-seeks.patch",
@@ -128,6 +128,8 @@ def main() -> None:
             f"{PREFIX}/vendor/capicola/lib/KeyframeRecorder.h",
             f"{PREFIX}/vendor/distingNT_API/LICENSE",
             f"{PREFIX}/vendor/distingNT_API/include/distingnt/api.h",
+            f"{PREFIX}/vendor/distingNT_API/include/distingnt/serialisation.h",
+            f"{PREFIX}/vendor/distingNT_API/include/distingnt/slot.h",
             f"{PREFIX}/SOURCE_PROVENANCE.txt",
         }
         missing = required - names

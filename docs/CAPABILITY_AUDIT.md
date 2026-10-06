@@ -2,9 +2,9 @@
 
 The machine-readable ledger is [`capability-set.json`](capability-set.json).
 The original approved discovery Spec remains immutable historical evidence.
-The owner-approved v0.6.0 update audits upstream v1.0.0 and extends the existing
-Pitch and Stretch controls with appended bipolar parameters; it adds no sampler
-transport or modulation matrix.
+The owner-approved v0.6.1 update retains the upstream v1.0.0 audit and reuses the
+original Pitch and Stretch slots for bipolar controls with center defaults and
+one-time preset range conversion.
 
 ## Pinned evidence baseline
 
@@ -26,8 +26,8 @@ preset-loading claim.
 
 The included user-facing processing capabilities are:
 
-- **Pitch:** legacy -12 to +12 semitones in 0.1-semitone steps; appended Bipolar Pitch extends the signed head rate to -2…+2. Its 0% default preserves the legacy rate, and -50% stops the head.
-- **Stretch:** legacy real time to freeze with the `(1-x)^2.5` taper; appended Bipolar Stretch extends the signed grid rate to -1…+1. Its 0% default preserves the legacy rate, and -50% freezes the grid.
+- **Pitch:** original slot 9 now ranges from -100…+100%, with signed head rate -2…+2 and center default 0% / Hold. Old saved values receive a one-time affine range conversion.
+- **Stretch:** original slot 10 now ranges from -100…+100%, with signed grid rate -1…+1, `sign(x) * abs(x)^2.5` taper and center default 0% / Freeze. Old saved values receive a one-time affine range conversion.
 - **Threshold:** adaptive transient ratio 0–8; the top disables automatic triggers.
 - **Grain Size:** 32–4096 keyframes.
 - **Quality:** preserves NT's analyzer epsilon 0.1 (coarse) to 0.001 (fine) for old presets. Upstream v1.0 changes its panel coarse endpoint to 0.03; the Analyzer itself is unchanged.
@@ -41,6 +41,11 @@ The included user-facing processing capabilities are:
 - **Slice:** momentary manual splice action, ignored until the engine has started processing.
 
 Every control is stereo-linked, and ordinary modulation uses NT parameter mapping. The JSON ledger records a source symbol and an NT-specific constraint for every item.
+
+Converted presets use the new control and CV behavior. The saved format marker
+prevents repeat conversion; no old response curve is retained. The other 24
+parameter definitions and all pre-v0.6.0 indices/pages stay unchanged. The two
+v0.6.0 appended parameters are removed under the owner's compatibility waiver.
 
 The wrapper retains the upstream stereo coordination rule: if exactly one
 channel automatically fires in a block and the source-grid lags differ by more

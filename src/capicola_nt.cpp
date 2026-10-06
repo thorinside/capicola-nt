@@ -9,10 +9,12 @@
 #include <new>
 
 #include <distingnt/api.h>
+#include <distingnt/serialisation.h>
+#include <distingnt/slot.h>
 #include <distingnt/wav.h>
 
 #include "capicola_nt/live_path.h"
-#include "capicola_nt/bipolar_mapping.h"
+#include "capicola_nt/preset_format.h"
 
 namespace {
 
@@ -64,8 +66,6 @@ enum Parameter {
     // Released parameter indices above this line are preset-stable. Append
     // wrapper controls here even when a page presents them earlier.
     kParamInputGain,
-    kParamBipolarPitch,
-    kParamBipolarStretch,
     kNumParameters,
 };
 
@@ -103,10 +103,10 @@ static const _NT_parameter kParameterTemplate[] = {
      .unit = kNT_unitHasStrings, .scaling = 0, .enumStrings = nullptr},
     {.name = "Sample", .min = 0, .max = 0, .def = 0,
      .unit = kNT_unitConfirm, .scaling = 0, .enumStrings = nullptr},
-    {.name = "Pitch", .min = -120, .max = 120, .def = 0,
-     .unit = kNT_unitSemitones, .scaling = kNT_scaling10, .enumStrings = nullptr},
-    {.name = "Stretch", .min = 0, .max = 100, .def = 0,
-     .unit = kNT_unitPercent, .scaling = 0, .enumStrings = nullptr},
+    {.name = "Pitch", .min = -10000, .max = 10000, .def = 0,
+     .unit = kNT_unitPercent, .scaling = kNT_scaling100, .enumStrings = nullptr},
+    {.name = "Stretch", .min = -10000, .max = 10000, .def = 0,
+     .unit = kNT_unitPercent, .scaling = kNT_scaling100, .enumStrings = nullptr},
     {.name = "Threshold", .min = 0, .max = 100, .def = 22,
      .unit = kNT_unitPercent, .scaling = 0, .enumStrings = nullptr},
     {.name = "Grain Size", .min = 32, .max = 4096, .def = 128,
@@ -135,10 +135,6 @@ static const _NT_parameter kParameterTemplate[] = {
     NT_PARAMETER_CV_OUTPUT("Output Envelope output", 0, 0)
     {.name = "Input Gain", .min = -60, .max = 0, .def = 0,
      .unit = kNT_unitDb, .scaling = kNT_scalingNone, .enumStrings = nullptr},
-    {.name = "Bipolar Pitch", .min = -100, .max = 100, .def = 0,
-     .unit = kNT_unitPercent, .scaling = 0, .enumStrings = nullptr},
-    {.name = "Bipolar Stretch", .min = -100, .max = 100, .def = 0,
-     .unit = kNT_unitPercent, .scaling = 0, .enumStrings = nullptr},
 };
 
 static const uint8_t kPerformanceParameters[] = {
@@ -155,8 +151,6 @@ static const uint8_t kPerformanceParameters[] = {
     kParamDriveCharacter,
     kParamMix,
     kParamFeedbackTone,
-    kParamBipolarPitch,
-    kParamBipolarStretch,
 };
 
 static const uint8_t kSourceParameters[] = {
@@ -233,6 +227,7 @@ struct Algorithm : public _NT_algorithm {
     uint32_t pendingUiValueMask;
     int16_t appliedControls[ARRAY_SIZE(kPerformanceParameters)];
     bool processingControlsApplied;
+    capicola_nt::PresetFormat presetFormat;
     bool processorFaulted;
     float lastOutputLeft;
     float lastOutputRight;
@@ -379,11 +374,60 @@ _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& memory,
     return algorithm;
 }
 
-float stretchValue(int32_t value) {
-    if (value < 0) value = 0;
-    if (value > 100) value = 100;
-    const float normalized = static_cast<float>(value) * 0.01f;
-    return std::pow(1.0f - normalized, 2.5f);
+bool presetBaseValues(Algorithm* algorithm, int& pitch, int& stretch) {
+    const int32_t index = NT_algorithmIndex(algorithm);
+    _NT_slot slot;
+    if (index < 0 || !NT_getSlot(slot, static_cast<uint32_t>(index))) return false;
+    const uint32_t offset = NT_parameterOffset();
+    pitch = slot.parameterPresetValue(offset + kParamPitch);
+    stretch = slot.parameterPresetValue(offset + kParamStretch);
+    return true;
+}
+
+void updatePresetFormat(Algorithm* algorithm) {
+    auto& format = algorithm->presetFormat;
+    if (!format.needsMigration && format.pending == 0) return;
+    int pitch = 0, stretch = 0;
+    if (!presetBaseValues(algorithm, pitch, stretch)) return;
+    if (format.needsMigration) {
+        format.target[0] = static_cast<int16_t>(capicola_nt::pitchValueFromLegacy(pitch));
+        format.target[1] = static_cast<int16_t>(capicola_nt::stretchValueFromLegacy(stretch));
+        format.pending = 3;
+        format.queued = 0;
+        format.needsMigration = false;
+        algorithm->processingControlsApplied = false;
+    }
+    const int bases[] = {pitch, stretch};
+    const int parameters[] = {kParamPitch, kParamStretch};
+    for (int i = 0; i < 2; ++i) {
+        const uint8_t bit = static_cast<uint8_t>(1U << i);
+        if ((format.pending & bit) == 0) continue;
+        format.base[i] = static_cast<int16_t>(bases[i]);
+        if (bases[i] == format.target[i]) {
+            format.pending &= ~bit;
+        } else if ((format.queued & bit) == 0) {
+            // Set before the host call, which may immediately notify us.
+            format.queued |= bit;
+            NT_setParameterFromAudio(NT_algorithmIndex(algorithm),
+                parameters[i] + NT_parameterOffset(), format.target[i]);
+        }
+    }
+    // A host may commit immediately or publish these writes on a later block.
+    // Never migrate a mapped effective value instead of the saved base.
+    if (presetBaseValues(algorithm, pitch, stretch)) {
+        if (pitch == format.target[0]) format.pending &= ~uint8_t{1};
+        if (stretch == format.target[1]) format.pending &= ~uint8_t{2};
+    }
+    if (format.pending == 0) format = {};
+}
+
+int processingControlValue(const Algorithm* algorithm, int parameter, int value) {
+    const auto& format = algorithm->presetFormat;
+    const int index = parameter == kParamPitch ? 0 : 1;
+    if (parameter != kParamPitch && parameter != kParamStretch) return value;
+    if ((format.pending & (1U << index)) == 0) return value;
+    return capicola_nt::clampControl(
+        format.target[index] + value - format.base[index], -10000, 10000);
 }
 
 float thresholdValue(int32_t value) {
@@ -406,15 +450,14 @@ void applyProcessingControls(Algorithm* algorithm) {
     bool ratesChanged = false;
     for (std::size_t i = 0; i < ARRAY_SIZE(kPerformanceParameters); ++i) {
         const int parameter = kPerformanceParameters[i];
+        const int value = processingControlValue(algorithm, parameter, algorithm->v[parameter]);
         if (algorithm->processingControlsApplied &&
-            algorithm->appliedControls[i] == algorithm->v[parameter]) {
+            algorithm->appliedControls[i] == value) {
             continue;
         }
         switch (parameter) {
             case kParamPitch:
             case kParamStretch:
-            case kParamBipolarPitch:
-            case kParamBipolarStretch:
                 ratesChanged = true;
                 break;
             case kParamThreshold:
@@ -463,16 +506,13 @@ void applyProcessingControls(Algorithm* algorithm) {
                 break;
         }
         algorithm->appliedControls[i] =
-            algorithm->v[parameter];
+            static_cast<int16_t>(value);
     }
     if (ratesChanged) {
-        const float pitch = std::exp2(
-            static_cast<float>(algorithm->v[kParamPitch]) * 0.1f / 12.0f);
-        algorithm->processor->setPitchRate(capicola_nt::bipolarRate(
-            pitch, algorithm->v[kParamBipolarPitch], 2.0f));
-        algorithm->processor->setStretch(capicola_nt::bipolarRate(
-            stretchValue(algorithm->v[kParamStretch]),
-            algorithm->v[kParamBipolarStretch], 1.0f));
+        algorithm->processor->setPitchRate(capicola_nt::bipolarPitchRate(
+            processingControlValue(algorithm, kParamPitch, algorithm->v[kParamPitch])));
+        algorithm->processor->setStretch(capicola_nt::bipolarStretchRate(
+            processingControlValue(algorithm, kParamStretch, algorithm->v[kParamStretch])));
     }
     algorithm->processingControlsApplied = true;
 }
@@ -886,8 +926,6 @@ void parameterChanged(_NT_algorithm* base, int parameter) {
             break;
         case kParamPitch:
         case kParamStretch:
-        case kParamBipolarPitch:
-        case kParamBipolarStretch:
         case kParamThreshold:
         case kParamGrainSize:
         case kParamQuality:
@@ -898,7 +936,7 @@ void parameterChanged(_NT_algorithm* base, int parameter) {
         case kParamDriveCharacter:
         case kParamMix:
         case kParamFeedbackTone:
-            applyProcessingControls(algorithm);
+            algorithm->processingControlsApplied = false;
             break;
         default:
             break;
@@ -1300,6 +1338,7 @@ void step(_NT_algorithm* base, float* busFrames, int numFramesBy4) {
     }
     std::memset(algorithm->inputTransientCv, 0, frames * sizeof(float));
     std::memset(algorithm->outputTransientCv, 0, frames * sizeof(float));
+    updatePresetFormat(algorithm);
     selectSource(algorithm,
                  algorithm->v[kParamSource] == kSourceSample
                      ? kSourceSample : kSourceLive);
@@ -1548,27 +1587,20 @@ void formatControlValue(const Algorithm* algorithm, int parameter,
                         char* text, std::size_t size) {
     const long value = static_cast<long>(displayedValue(algorithm, parameter));
     if (parameter == kParamPitch) {
-        const int32_t bipolar = displayedValue(algorithm, kParamBipolarPitch);
-        if (bipolar != 0) {
-            const float rate = capicola_nt::bipolarRate(
-                std::exp2(static_cast<float>(value) * 0.1f / 12.0f), bipolar, 2.0f);
-            if (rate == 0.0f) {
-                copyLiteral(text, size, "HOLD");
-            } else {
-                const long hundredths = static_cast<long>(std::fabs(rate) * 100.0f + 0.5f);
-                std::snprintf(text, size, "%c%ld.%02ldx", rate < 0.0f ? '-' : '+',
-                              hundredths / 100L, hundredths % 100L);
-            }
-            return;
+        const float rate = capicola_nt::bipolarPitchRate(
+            processingControlValue(algorithm, parameter, value));
+        if (rate == 0.0f) {
+            copyLiteral(text, size, "HOLD");
+        } else {
+            const long hundredths = static_cast<long>(std::fabs(rate) * 100.0f + 0.5f);
+            std::snprintf(text, size, "%c%ld.%02ldx", rate < 0.0f ? '-' : '+',
+                          hundredths / 100L, hundredths % 100L);
         }
-        const long magnitude = value < 0 ? -value : value;
-        std::snprintf(text, size, "%c%ld.%ld st",
-                      value < 0 ? '-' : '+', magnitude / 10, magnitude % 10);
     } else if (parameter == kParamGrainSize) {
         std::snprintf(text, size, "%ld", value);
     } else if (parameter == kParamStretch) {
-        const float rate = capicola_nt::bipolarRate(stretchValue(value),
-            displayedValue(algorithm, kParamBipolarStretch), 1.0f);
+        const float rate = capicola_nt::bipolarStretchRate(
+            processingControlValue(algorithm, parameter, value));
         if (rate == 0.0f) {
             copyLiteral(text, size, "FREEZE");
         } else {
@@ -1648,6 +1680,13 @@ bool pressed(const _NT_uiData& data, uint16_t control) {
 }
 
 void setFromUi(Algorithm* algorithm, int parameter, int value) {
+    if (parameter == kParamPitch || parameter == kParamStretch) {
+        const uint8_t bit = parameter == kParamPitch ? 1 : 2;
+        algorithm->presetFormat.pending &= ~bit;
+        algorithm->presetFormat.queued &= ~bit;
+        value = capicola_nt::clampControl(value, -10000, 10000);
+        algorithm->processingControlsApplied = false;
+    }
     const _NT_parameter& definition = algorithm->params[parameter];
     if (value < definition.min) value = definition.min;
     if (value > definition.max) value = definition.max;
@@ -1749,6 +1788,66 @@ void setupUi(_NT_algorithm* base, _NT_float3& pots) {
     }
 }
 
+void serialise(_NT_algorithm* base, _NT_jsonStream& stream) {
+    Algorithm* algorithm = static_cast<Algorithm*>(base);
+    const auto& format = algorithm->presetFormat;
+    stream.addMemberName("capicolaFormatVersion");
+    stream.addNumber(format.needsMigration ? 1 : capicola_nt::kPresetFormatVersion);
+    if (format.needsMigration) return;
+    // If saved during a deferred host commit, persist only its remaining
+    // targets. Reload finishes the writes without a second range conversion.
+    if ((format.pending & 1) != 0) {
+        stream.addMemberName("migrationPitchTarget");
+        stream.addNumber(format.target[0]);
+    }
+    if ((format.pending & 2) != 0) {
+        stream.addMemberName("migrationStretchTarget");
+        stream.addNumber(format.target[1]);
+    }
+}
+
+bool deserialise(_NT_algorithm* base, _NT_jsonParse& parse) {
+    Algorithm* algorithm = static_cast<Algorithm*>(base);
+    capicola_nt::PresetFormat restored;
+    restored.needsMigration = true; // Unversioned presets are the original format.
+    int members = 0;
+    int version = 1;
+    uint32_t seen = 0;
+    if (parse.numberOfObjectMembers(members)) {
+        for (int i = 0; i < members; ++i) {
+            int value = 0;
+            uint32_t bit = 0;
+            if (parse.matchName("capicolaFormatVersion")) {
+                bit = 1;
+                if (!parse.number(value) || value < 1 ||
+                    value > capicola_nt::kPresetFormatVersion) return false;
+                version = value;
+            } else if (parse.matchName("migrationPitchTarget")) {
+                bit = 2;
+                if (!parse.number(value) || value < -10000 || value > 10000) return false;
+                restored.target[0] = static_cast<int16_t>(value);
+                restored.pending |= 1;
+            } else if (parse.matchName("migrationStretchTarget")) {
+                bit = 4;
+                if (!parse.number(value) || value < -10000 || value > 10000) return false;
+                restored.target[1] = static_cast<int16_t>(value);
+                restored.pending |= 2;
+            } else if (!parse.skipMember()) {
+                return false;
+            }
+            if (bit != 0 && (seen & bit) != 0) return false;
+            seen |= bit;
+        }
+    }
+    if (version == 1 && (seen & 6) != 0) return false;
+    restored.needsMigration = version == 1;
+    // No host setters, parameter reads, or DSP work here: the SDK does not
+    // specify whether custom state precedes parameter/mapping restoration.
+    algorithm->presetFormat = restored;
+    algorithm->processingControlsApplied = false;
+    return true;
+}
+
 static const _NT_factory kFactory = {
     .guid = NT_MULTICHAR('T', 'h', 'C', 'a'),
     .name = "Capicola",
@@ -1768,8 +1867,8 @@ static const _NT_factory kFactory = {
     .hasCustomUi = hasCustomUi,
     .customUi = customUi,
     .setupUi = setupUi,
-    .serialise = nullptr,
-    .deserialise = nullptr,
+    .serialise = serialise,
+    .deserialise = deserialise,
     .midiSysEx = nullptr,
     .parameterUiPrefix = nullptr,
     .parameterString = parameterString,

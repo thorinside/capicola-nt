@@ -9,7 +9,7 @@ This is an independently maintained disting NT wrapper around
 [Capicola by Heavylight Industries](https://github.com/heavylight-industries/capicola),
 not an official Heavylight Industries release.
 
-- **Current release:** [v0.6.0](https://github.com/thorinside/capicola-nt/releases/tag/v0.6.0)
+- **Release in this source:** v0.6.1
 - **Supported baseline:** disting NT firmware 1.16.0, plug-in API v13
 - **Plug-in GUID:** `ThCa`
 
@@ -61,8 +61,8 @@ The factory routing is ready for a basic stereo patch:
 1. Patch a stereo source to inputs 1 and 2. For mono, set **Right input** to
    `None`; the left input will feed both processing channels.
 2. Listen to outputs 1 and 2.
-3. Begin with **Input Gain** at 0 dB, **Stretch** at 0%, **Feedback** at
-   0%, and **Mix** at 100%.
+3. Begin with **Input Gain** at 0 dB, **Pitch** at +50%, **Stretch** at +100%,
+   **Feedback** at 0%, and **Mix** at 100% for forward unity.
 4. If these output buses are dedicated to Capicola, change both output modes to
    **Replace**. Leave them on **Add** only when you intentionally want to mix
    Capicola with other algorithms on the same buses.
@@ -173,8 +173,8 @@ continuous controls are on the NT **Performance** parameter page.
 | Control | Range/action | Default | What it does |
 | --- | ---: | ---: | --- |
 | Input Gain | -60–0 dB | 0 dB | Attenuates Live or Sample before the engine; it also affects the dry path |
-| Pitch | -12 to +12 semitones | 0 | Transposes the processed audio |
-| Stretch | 1.0× to Freeze | 1.0× | Slows the playback grid; the screen shows the time factor |
+| Pitch | -100–100% | 0% / Hold | Sets a signed pitch-head rate from -2× to +2× |
+| Stretch | -100–100% | 0% / Freeze | Sets a signed stretch-grid rate from -1× to +1× |
 | Threshold | 0–100% | 22% | Sets the automatic transient threshold; 100% disables automatic triggers |
 | Grain Size | 32–4096 | 128 | Sets the analysis grain length in keyframes |
 | Quality | 0–100% | 100% | Moves from coarse to fine analysis |
@@ -185,25 +185,24 @@ continuous controls are on the NT **Performance** parameter page.
 | Drive Character | 0–100% | 100% | 0% Quake, 50% Clean, 100% Sinc |
 | Mix | 0–100% | 100% | Dry to wet |
 | Feedback Tone | 0–100% | 37.69% | Moves the feedback band-pass centre from low to high |
-| Bipolar Pitch | -100–100% | 0% | Extends the legacy Pitch rate through stop to reverse |
-| Bipolar Stretch | -100–100% | 0% | Extends the legacy Stretch grid rate through freeze to reverse |
 | Slice | Right encoder press | — | Forces a manual splice |
 
-The bipolar controls are at the end of the **Performance** parameter page and
-use ordinary NT parameter mapping. At **0%**, each preserves its corresponding
-Pitch or Stretch setting. **-50%** stops the pitch head or freezes the stretch
-grid. Below -50% it reverses, reaching -2× pitch or -1× stretch at -100%; +100%
-reaches +2× pitch or +1× stretch. Pitch stop holds the head, while Stretch freeze
-holds the grid and lets the grains continue. Set Threshold to 100% to prevent
-automatic transient catches while exploring slow or reverse history.
+Pitch and Stretch use their original positions on the **Performance** page
+and ordinary NT parameter mapping. Their **0%** defaults stop the pitch head
+and freeze the stretch grid. Negative values reverse the captured history;
+positive values move it forward. For forward unity, set **Pitch to +50%** and
+**Stretch to +100%**. The performance screen shows the signed pitch rate or
+`HOLD`, and the stretch time factor or `FREEZE`. Stretch freeze holds the grid
+while grains continue. Set Threshold to 100% to prevent automatic transient
+catches while exploring slow or reverse history.
 
-The performance screen shows a negative stretch factor for reverse and
-`FREEZE` for a stopped grid. When Bipolar Pitch is active, it shows the signed
-head rate or `HOLD`; centered Bipolar Pitch retains the semitone display.
-
-The original 26 parameter definitions and page entries retain their positions.
-The two appended controls default to center, so a restored legacy value vector
-with the new defaults keeps its Pitch and Stretch rates.
+Unversioned presets use a one-time linear range conversion: old Pitch
+-12…+12 semitones becomes -100…+100%, and old Stretch 0…100% becomes -100…+100%.
+For example, old Pitch 0 becomes 0% / Hold; old Stretch 0, 50 and 100 become
+-100%, 0% / Freeze and +100%. Converted presets use the new sound and CV
+response and save an internal format version. All 26 original parameter and
+page positions remain. The two controls appended in v0.6.0 are removed;
+v0.6.0 preset compatibility is outside this update's scope.
 
 Feedback above 100% can grow rapidly and become loud. Reduce Feedback and your
 monitoring level before experimenting in that range.
@@ -219,15 +218,14 @@ Replace when the output bus is dedicated to Capicola.
 
 Stretch already reaches its maximum at **FREEZE**. Capicola also follows
 transients: each accepted transient catches the read head up toward the current
-audio, which preserves rhythm but can make a large Stretch setting sound much
-shorter.
+audio, which preserves rhythm but can make a slow stretch sound much shorter.
 
-For an obvious sustained stretch, set Mix to 100%, raise Stretch, set Threshold
-to 100% to disable automatic transient catches, and try a larger Grain Size.
-At the upstream taper's midpoint the screen shows about **5.7×**; the clockwise
-stop shows **FREEZE**. Grain Size changes the distance between adaptive splices,
-not the maximum Stretch. Press the right encoder only when you intentionally
-want a manual Slice to catch up.
+For an obvious sustained stretch, set Mix to 100%, move Stretch from +100%
+towards 0%, set Threshold to 100% to disable automatic transient catches, and
+try a larger Grain Size. At +50% the screen shows about **5.7×**; at center it
+shows **FREEZE**. Below center the captured history runs in reverse. Grain Size
+changes the distance between adaptive splices. Press the right encoder only
+when you intentionally want a manual Slice to catch up.
 
 Stereo channels follow their own transients. When just one channel catches up
 and their source positions differ by more than one second, Capicola also
@@ -264,7 +262,8 @@ do not create extra Input Transient pulses.
 - **Capicola is not in the algorithm list:** confirm `capicola.o` is in
   `/programs/plug-ins/`, then rescan plug-ins or restart the NT.
 - **No sound in Live mode:** check Left/Right input and output routing, set Mix
-  to 100%, Stretch to 0%, Feedback to 0%, and use Replace on dedicated outputs.
+  to 100%, Pitch to +50%, Stretch to +100%, Feedback to 0%, and use Replace on
+  dedicated outputs.
 - **A mono patch is only on the left:** set Right input to `None` to normalize
   Left input to both channels.
 - **The display says CAPICOLA WAIT:** make sure the SD card is mounted and the

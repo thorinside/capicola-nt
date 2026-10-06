@@ -53,7 +53,7 @@ $(CAPICOLA_OVERLAY_STAMP): tools/prepare_capicola_overlay.sh $(CAPICOLA_PATCHES)
 		"$(CAPICOLA_SOURCE_DIR)" "$(CAPICOLA_OVERLAY)" "patches/capicola"
 
 $(PLUGIN): src/capicola_nt.cpp include/capicola_nt/live_path.h \
-		include/capicola_nt/bipolar_mapping.h \
+		include/capicola_nt/preset_format.h \
 		include/capicola_nt/int64_to_double.h $(CAPICOLA_OVERLAY_STAMP)
 	mkdir -p "$(@D)"
 	$(ARM_CXX) -std=gnu++17 -mcpu=cortex-m7 -mfpu=fpv5-d16 \

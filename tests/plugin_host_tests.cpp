@@ -9,9 +9,14 @@
 #include <vector>
 
 #include <distingnt/api.h>
+#define _DISTINGNT_SERIALISATION_INTERNAL
+#define _DISTINGNT_SLOT_INTERNAL
+#include <distingnt/serialisation.h>
+#include <distingnt/slot.h>
 #include <distingnt/wav.h>
 
 #include "capicola_nt/live_path.h"
+#include "capicola_nt/preset_format.h"
 
 namespace {
 
@@ -44,6 +49,19 @@ uint32_t gOpenedStreamFrameCount = 0;
 bool gConstantSample = false;
 _NT_algorithm* gAlgorithm = nullptr;
 const _NT_factory* gFactory = nullptr;
+bool gSlotAvailable = true;
+bool gDeferAudioCommit = false;
+uint32_t gAudioParameterWrites = 0;
+uint32_t gSlotReads = 0;
+uint32_t gParameterOffset = 0;
+struct AudioWrite { _NT_algorithm* algorithm; uint32_t parameter; int16_t value; };
+std::vector<AudioWrite> gAudioWrites;
+struct JsonMember { std::string name; int value; bool numeric = true; };
+struct HostJson {
+    bool object = true;
+    std::vector<JsonMember> members;
+    std::string pendingName;
+};
 struct HostStreamState {
     uint32_t folder;
     uint32_t sample;
@@ -232,8 +250,23 @@ extern "C" uint32_t NT_streamRender(_NT_stream stream,
     return rendered;
 }
 
-extern "C" int32_t NT_algorithmIndex(const _NT_algorithm*) {
+extern "C" int32_t NT_algorithmIndex(const _NT_algorithm* algorithm) {
+    gAlgorithm = const_cast<_NT_algorithm*>(algorithm);
     return 0;
+}
+
+extern "C" bool NT_getSlot(_NT_slot& slot, uint32_t index) {
+    ++gSlotReads;
+    if (!gSlotAvailable || index != 0 || gAlgorithm == nullptr) return false;
+    slot.refCon = gAlgorithm;
+    return true;
+}
+
+int16_t _NT_slot::parameterPresetValue(uint32_t index) const {
+    const auto* algorithm = static_cast<const _NT_algorithm*>(refCon);
+    const int16_t* base = algorithm->vIncludingCommon != nullptr
+        ? algorithm->vIncludingCommon : algorithm->v;
+    return base[index - gParameterOffset];
 }
 
 extern "C" void NT_updateParameterDefinition(uint32_t, uint32_t) {
@@ -241,7 +274,29 @@ extern "C" void NT_updateParameterDefinition(uint32_t, uint32_t) {
 }
 
 extern "C" uint32_t NT_parameterOffset() {
-    return 0;
+    return gParameterOffset;
+}
+
+void commitHostParameter(_NT_algorithm* algorithm, uint32_t parameter, int16_t value) {
+    const uint32_t p = parameter - gParameterOffset;
+    int delta = 0;
+    if (algorithm->vIncludingCommon != nullptr) {
+        delta = algorithm->v[p] - algorithm->vIncludingCommon[p];
+        const_cast<int16_t*>(algorithm->vIncludingCommon)[p] = value;
+    }
+    const auto& definition = algorithm->parameters[p];
+    const_cast<int16_t*>(algorithm->v)[p] = static_cast<int16_t>(
+        capicola_nt::clampControl(value + delta, definition.min, definition.max));
+    gFactory->parameterChanged(algorithm, static_cast<int>(p));
+}
+
+extern "C" void NT_setParameterFromAudio(uint32_t, uint32_t parameter, int16_t value) {
+    ++gAudioParameterWrites;
+    if (gDeferAudioCommit) {
+        gAudioWrites.push_back({gAlgorithm, parameter, value});
+    } else {
+        commitHostParameter(gAlgorithm, parameter, value);
+    }
 }
 
 extern "C" void NT_setParameterFromUi(uint32_t, uint32_t parameter, int16_t value) {
@@ -251,14 +306,51 @@ extern "C" void NT_setParameterFromUi(uint32_t, uint32_t parameter, int16_t valu
             gPendingParameterValue = value;
             return;
         }
-        const_cast<int16_t*>(gAlgorithm->v)[parameter] = value;
-        gFactory->parameterChanged(gAlgorithm, static_cast<int>(parameter));
+        commitHostParameter(gAlgorithm, parameter, value);
     }
 }
 
 void NT_drawText(int x, int, const char* text, int,
                  _NT_textAlignment, _NT_textSize size) {
     gDrawnText.push_back({text == nullptr ? "" : text, x, size});
+}
+
+_NT_jsonStream::_NT_jsonStream(void* context) : refCon(context) {}
+_NT_jsonStream::~_NT_jsonStream() = default;
+void _NT_jsonStream::addMemberName(const char* name) {
+    static_cast<HostJson*>(refCon)->pendingName = name;
+}
+void _NT_jsonStream::addNumber(int value) {
+    auto& json = *static_cast<HostJson*>(refCon);
+    json.members.push_back({json.pendingName, value});
+}
+_NT_jsonParse::_NT_jsonParse(void* context, int index) : refCon(context), i(index) {}
+_NT_jsonParse::~_NT_jsonParse() = default;
+bool _NT_jsonParse::numberOfObjectMembers(int& number) {
+    const auto& json = *static_cast<const HostJson*>(refCon);
+    number = static_cast<int>(json.members.size());
+    return json.object;
+}
+bool _NT_jsonParse::matchName(const char* name) {
+    const auto& json = *static_cast<const HostJson*>(refCon);
+    if ((i & 1) != 0 || i / 2 >= static_cast<int>(json.members.size()) ||
+        json.members[i / 2].name != name) return false;
+    ++i;
+    return true;
+}
+bool _NT_jsonParse::number(int& value) {
+    const auto& json = *static_cast<const HostJson*>(refCon);
+    if ((i & 1) == 0 || i / 2 >= static_cast<int>(json.members.size()) ||
+        !json.members[i / 2].numeric) return false;
+    value = json.members[i / 2].value;
+    ++i;
+    return true;
+}
+bool _NT_jsonParse::skipMember() {
+    const auto& json = *static_cast<const HostJson*>(refCon);
+    if ((i & 1) != 0 || i / 2 >= static_cast<int>(json.members.size())) return false;
+    i += 2;
+    return true;
 }
 
 namespace {
@@ -270,10 +362,11 @@ struct HostPlugin {
     _NT_algorithmRequirements requirements{};
     std::vector<uint8_t> sram, dram, dtc;
     std::vector<int16_t> values;
+    std::vector<int16_t> baseValues;
     std::vector<float> buses;
     _NT_algorithm* algorithm;
 
-    HostPlugin() : factory(reinterpret_cast<const _NT_factory*>(
+    explicit HostPlugin(bool unity = true) : factory(reinterpret_cast<const _NT_factory*>(
         pluginEntry(kNT_selector_factoryInfo, 0))) {
         gCardMounted = true;
         gNumFolders = 2;
@@ -285,6 +378,10 @@ struct HostPlugin {
         gStreamOpenSucceeds = true;
         gStreamInitialEmptyRenders = 0;
         gDeferParameterUiCommit = false;
+        gSlotAvailable = true;
+        gDeferAudioCommit = false;
+        gParameterOffset = 0;
+        gAudioWrites.clear();
         factory->calculateRequirements(requirements, nullptr);
         sram.resize(requirements.sram);
         dram.resize(requirements.dram);
@@ -297,10 +394,15 @@ struct HostPlugin {
             values[i] = algorithm->parameters[i].def;
         }
         algorithm->v = values.data();
+        baseValues = values;
+        algorithm->vIncludingCommon = baseValues.data();
         buses.resize(kNT_lastBus * kFrames);
         activate();
         set("Left output mode", 1);
         set("Right output mode", 1);
+        // Most source-path tests need unity processing. Tests of actual fresh
+        // defaults explicitly opt out, so the center stop/freeze stays tested.
+        if (unity) { set("Pitch", 5000); set("Stretch", 10000); }
     }
 
     void activate() { gAlgorithm = algorithm; gFactory = factory; }
@@ -311,11 +413,38 @@ struct HostPlugin {
         activate();
         const int p = parameter(name);
         values[p] = static_cast<int16_t>(value);
+        baseValues[p] = static_cast<int16_t>(value);
         factory->parameterChanged(algorithm, p);
     }
     void step() {
         activate();
         factory->step(algorithm, buses.data(), kFrames / 4);
+    }
+    void map(const char* name, int delta) {
+        const int p = parameter(name);
+        const auto& definition = algorithm->parameters[p];
+        values[p] = static_cast<int16_t>(capicola_nt::clampControl(
+            baseValues[p] + delta, definition.min, definition.max));
+    }
+    bool restore(HostJson& json, bool pointersUnavailable = false) {
+        activate();
+        const int16_t* savedValues = algorithm->v;
+        const int16_t* savedBase = algorithm->vIncludingCommon;
+        if (pointersUnavailable) { algorithm->v = nullptr; algorithm->vIncludingCommon = nullptr; }
+        const uint32_t reads = gSlotReads, writes = gAudioParameterWrites;
+        _NT_jsonParse parse(&json, 0);
+        const bool result = factory->deserialise(algorithm, parse);
+        algorithm->v = savedValues;
+        algorithm->vIncludingCommon = savedBase;
+        if (gSlotReads != reads || gAudioParameterWrites != writes) return false;
+        return result;
+    }
+    HostJson save() {
+        activate();
+        HostJson json;
+        _NT_jsonStream stream(&json);
+        factory->serialise(algorithm, stream);
+        return json;
     }
     void ui(const _NT_uiData& event) {
         activate();
@@ -327,7 +456,7 @@ struct HostPlugin {
 };
 
 bool testReleasedParameterAndPagePrefixes() {
-    HostPlugin plugin;
+    HostPlugin plugin(false);
     struct Definition { const char* name; int min, max, def, unit, scaling; };
     const Definition released[] = {
         {"Left input", 1, 64, 1, kNT_unitAudioInput, 0},
@@ -339,8 +468,8 @@ bool testReleasedParameterAndPagePrefixes() {
         {"Source", 0, 1, 0, kNT_unitEnum, 0},
         {"Folder", 0, 1, 0, kNT_unitHasStrings, 0},
         {"Sample", 0, 1, 0, kNT_unitConfirm, 0},
-        {"Pitch", -120, 120, 0, kNT_unitSemitones, kNT_scaling10},
-        {"Stretch", 0, 100, 0, kNT_unitPercent, 0},
+        {"Pitch", -10000, 10000, 0, kNT_unitPercent, kNT_scaling100},
+        {"Stretch", -10000, 10000, 0, kNT_unitPercent, kNT_scaling100},
         {"Threshold", 0, 100, 22, kNT_unitPercent, 0},
         {"Grain Size", 32, 4096, 128, kNT_unitNone, 0},
         {"Quality", 0, 100, 100, kNT_unitPercent, 0},
@@ -357,7 +486,8 @@ bool testReleasedParameterAndPagePrefixes() {
         {"Output Envelope output", 0, 64, 0, kNT_unitCvOutput, 0},
         {"Input Gain", -60, 0, 0, kNT_unitDb, kNT_scalingNone},
     };
-    if (plugin.requirements.numParameters != 28) return false;
+    if (plugin.requirements.numParameters != 26 || plugin.values[9] != 0 ||
+        plugin.values[10] != 0) return false;
     for (int i = 0; i < 26; ++i) {
         const auto& actual = plugin.algorithm->parameters[i];
         const auto& expected = released[i];
@@ -370,18 +500,11 @@ bool testReleasedParameterAndPagePrefixes() {
                 std::strcmp(actual.enumStrings[1], "Sample") != 0) return false;
         } else if (actual.enumStrings != nullptr) return false;
     }
-    for (int i = 26; i < 28; ++i) {
-        const auto& p = plugin.algorithm->parameters[i];
-        if (std::strcmp(p.name, i == 26 ? "Bipolar Pitch" : "Bipolar Stretch") ||
-            p.min != -100 || p.max != 100 || p.def != 0 ||
-            p.unit != kNT_unitPercent || p.scaling != 0 ||
-            p.enumStrings != nullptr || plugin.values[i] != 0) return false;
-    }
-    const uint8_t performance[] = {25,9,10,11,12,13,14,15,16,17,18,19,20,26,27};
+    const uint8_t performance[] = {25,9,10,11,12,13,14,15,16,17,18,19,20};
     const uint8_t source[] = {6,7,8};
     const uint8_t routing[] = {0,1,2,3,4,5,21,22,23,24};
     const uint8_t* indices[] = {performance, source, routing};
-    const int counts[] = {15,3,10};
+    const int counts[] = {13,3,10};
     const char* names[] = {"Performance", "Source", "Routing"};
     const auto* pages = plugin.algorithm->parameterPages;
     if (pages->numPages != 3) return false;
@@ -394,45 +517,179 @@ bool testReleasedParameterAndPagePrefixes() {
     return true;
 }
 
-bool testOldPresetVectorKeepsCenteredDefaults() {
+bool testUnversionedPresetMigratesToNewAudioAndCvBehavior() {
     for (int source : {0, 1}) {
-        HostPlugin restored, configured;
+      for (bool customFirst : {false, true}) {
+        HostPlugin restored(false), reference(false);
         // Literal v0.5.3 vector, copied into a newly defaulted factory instance.
         const int16_t preset[] = {
             1,0,13,1,14,1,static_cast<int16_t>(source),0,1,35,70,100,
             128,92,45,4259,2153,1429,5000,100,3769,0,0,0,0,-6,
         };
+        HostJson unversioned;
+        if (customFirst && !restored.restore(unversioned, true)) return false;
         std::copy(preset, preset + 26, restored.values.begin());
+        std::copy(preset, preset + 26, restored.baseValues.begin());
         for (int i = 0; i < 26; ++i) {
             restored.activate();
             restored.factory->parameterChanged(restored.algorithm, i);
-            if (i != 6) {
-                configured.set(configured.algorithm->parameters[i].name, preset[i]);
-            }
+            const int value = i == 9 ? capicola_nt::pitchValueFromLegacy(preset[i]) :
+                i == 10 ? capicola_nt::stretchValueFromLegacy(preset[i]) : preset[i];
+            if (i != 6) reference.set(reference.algorithm->parameters[i].name, value);
         }
-        configured.set("Source", source);
-        if (restored.values[26] != 0 || restored.values[27] != 0) return false;
+        reference.set("Source", source);
+        if (!customFirst && !restored.restore(unversioned)) return false;
+        // The reference is a fresh format-2 instance configured with the new
+        // bipolar values. Restored presets must use exactly this behavior.
         double energy = 0.0;
         for (int block = 0; block < 500; ++block) {
+            const int delta = block / 100 - 2;
+            restored.map("Pitch", delta * 40);
+            restored.map("Stretch", delta * 30);
+            reference.map("Pitch", delta * 40);
+            reference.map("Stretch", delta * 30);
             for (int i = 0; i < kFrames; ++i) {
-                restored.buses[i] = configured.buses[i] = 3.0f * std::sin(
+                restored.buses[i] = reference.buses[i] = 3.0f * std::sin(
                     2.0f * kPi * 237.0f * (block * kFrames + i) / 48000.0f);
             }
             restored.step();
-            configured.step();
+            reference.step();
             for (int i = 0; i < kFrames; ++i) {
-                if (restored.output(i) != configured.output(i)) return false;
+                if (restored.output(i) != reference.output(i)) return false;
                 energy += std::fabs(restored.output(i));
             }
         }
-        if (energy < 100.0) return false;
+        if (energy < 100.0 || restored.baseValues[9] !=
+            capicola_nt::pitchValueFromLegacy(35) || restored.baseValues[10] != 4000 ||
+            restored.save().members.size() != 1)
+            return false;
+      }
     }
     return true;
 }
 
+bool testPresetFormatRoundTripsAndRejectsMalformedData() {
+    HostPlugin fresh(false);
+    HostJson saved = fresh.save();
+    if (saved.members.size() != 1 || saved.members[0].name != "capicolaFormatVersion" ||
+        saved.members[0].value != 2) return false;
+    // Explicitly versioned center must never turn into the old forward unity.
+    if (!fresh.restore(saved, true)) return false;
+    fresh.step();
+    if (fresh.baseValues[9] != 0 || fresh.baseValues[10] != 0) return false;
+    for (bool customFirst : {false, true}) {
+        HostPlugin legacy(false), reloaded(false);
+        legacy.set("Pitch", -120);
+        legacy.set("Stretch", 0);
+        HostJson missing;
+        missing.object = false;
+        if (!legacy.restore(missing)) return false;
+        // Saving before audio retains the original format marker.
+        HostJson before = legacy.save();
+        if (before.members.size() != 1 || before.members[0].value != 1) return false;
+        legacy.step();
+        saved = legacy.save();
+        if (saved.members.size() != 1 || saved.members[0].value != 2 ||
+            legacy.baseValues[9] != -10000 || legacy.baseValues[10] != -10000 ||
+            legacy.algorithm->parameters[10].max != 10000) return false;
+        if (customFirst && !reloaded.restore(saved, true)) return false;
+        reloaded.values = legacy.values;
+        reloaded.baseValues = legacy.baseValues;
+        if (!customFirst && !reloaded.restore(saved)) return false;
+        reloaded.step();
+        if (reloaded.baseValues != legacy.baseValues ||
+            reloaded.save().members.size() != 1) return false;
+        // Converted presets use the same signed range and CV response as new
+        // instances, with no compatibility data remaining after conversion.
+        legacy.map("Stretch", 50);
+        reloaded.map("Stretch", 50);
+        if (reloaded.values[10] != -9950) return false;
+        legacy.step(); reloaded.step();
+        reloaded.set("Pitch", -5000);
+        reloaded.step();
+        HostJson edited = reloaded.save();
+        if (edited.members.size() != 1) return false;
+        reloaded.set("Stretch", -5000);
+        reloaded.step();
+        if (reloaded.save().members.size() != 1 ||
+            reloaded.algorithm->parameters[10].max != 10000) return false;
+    }
+    const HostJson malformed[] = {
+        {true, {{"capicolaFormatVersion", 3}}, ""},
+        {true, {{"capicolaFormatVersion", 0}}, ""},
+        {true, {{"capicolaFormatVersion", 2, false}}, ""},
+        {true, {{"capicolaFormatVersion", 2}, {"capicolaFormatVersion", 2}}, ""},
+        {true, {{"capicolaFormatVersion", 2}, {"migrationPitchTarget", 10001}}, ""},
+        {true, {{"capicolaFormatVersion", 2}, {"migrationStretchTarget", -10001}}, ""},
+        {true, {{"migrationPitchTarget", 0}}, ""},
+    };
+    for (HostJson json : malformed) {
+        if (fresh.restore(json, true) || fresh.save().members.size() != 1) return false;
+    }
+    HostJson withUnknown{true, {{"futureField", 123, false}, {"capicolaFormatVersion", 2}}, ""};
+    return fresh.restore(withUnknown, true);
+}
+
+bool testDeferredMigrationUsesBaseValuesAndCommonOffset() {
+    HostPlugin plugin(false), reference(false);
+    plugin.set("Pitch", 35);
+    plugin.set("Stretch", 20);
+    HostJson unversioned;
+    if (!plugin.restore(unversioned, true)) return false;
+    plugin.map("Pitch", 30);
+    plugin.map("Stretch", 10);
+    reference.set("Pitch", capicola_nt::pitchValueFromLegacy(35));
+    reference.set("Stretch", capicola_nt::stretchValueFromLegacy(20));
+    reference.map("Pitch", 30);
+    reference.map("Stretch", 10);
+    int block = 0;
+    const auto compareStep = [&]() {
+        for (int i = 0; i < kFrames; ++i) {
+            plugin.buses[i] = reference.buses[i] = 3.0f * std::sin(
+                2.0f * kPi * 237.0f * (block * kFrames + i) / 48000.0f);
+        }
+        plugin.step(); reference.step(); ++block;
+        for (int i = 0; i < kFrames; ++i) {
+            if (plugin.output(i) != reference.output(i) ||
+                plugin.output(i, 1) != reference.output(i, 1)) return false;
+        }
+        return true;
+    };
+    gDeferAudioCommit = true;
+    gParameterOffset = 7;
+    const uint32_t writes = gAudioParameterWrites;
+    for (int i = 0; i < 24; ++i) if (!compareStep()) return false;
+    if (gAudioParameterWrites != writes + 2 || gAudioWrites.size() != 2 ||
+        gAudioWrites[0].parameter != 16 || gAudioWrites[1].parameter != 17 ||
+        plugin.baseValues[9] != 35 || plugin.baseValues[10] != 20) return false;
+    HostJson midway = plugin.save();
+    if (midway.members.size() != 3 || midway.members[0].value != 2) return false;
+    // Commit separately, with another audio step between the two host writes.
+    for (const AudioWrite& write : gAudioWrites) {
+        commitHostParameter(write.algorithm, write.parameter, write.value);
+        if (!compareStep()) return false;
+    }
+    gAudioWrites.clear();
+    gDeferAudioCommit = false;
+    gParameterOffset = 0;
+    if (plugin.baseValues[9] != capicola_nt::pitchValueFromLegacy(35) ||
+        plugin.baseValues[10] != -6000 ||
+        plugin.values[9] != plugin.baseValues[9] + 30 ||
+        plugin.values[10] != -5990 || gAudioParameterWrites != writes + 2 ||
+        plugin.save().members.size() != 1) return false;
+    // A preset saved while migration writes are pending can finish after reload.
+    HostPlugin restored(false);
+    restored.set("Pitch", 35);
+    restored.set("Stretch", 20);
+    if (!restored.restore(midway, true)) return false;
+    restored.step();
+    return restored.baseValues[9] == capicola_nt::pitchValueFromLegacy(35) &&
+           restored.baseValues[10] == -6000 && restored.save().members.size() == 1;
+}
+
 bool testBipolarMappedValuesApplyWithoutCallbacks() {
     for (int source : {0, 1}) {
-        for (const char* control : {"Bipolar Pitch", "Bipolar Stretch"}) {
+        for (const char* control : {"Pitch", "Stretch"}) {
             HostPlugin notified, mapped, centered;
             for (HostPlugin* plugin : {&notified, &mapped, &centered}) {
                 plugin->set("Right input", 0);
@@ -441,7 +698,7 @@ bool testBipolarMappedValuesApplyWithoutCallbacks() {
                 plugin->set("Source", source);
             }
             double difference = 0.0;
-            const int positions[] = {-100, -50, -25, 50, 100};
+            const int positions[] = {-10000, 0, -2500, 5000, 10000};
             for (int block = 0; block < 1600; ++block) {
                 if (block >= 400 && block % 200 == 0) {
                     const int position = positions[((block - 400) / 200) % 5];
@@ -555,31 +812,31 @@ bool testBipolarDisplayShowsEffectiveRates() {
         gDrawnText.clear();
         plugin.factory->draw(plugin.algorithm);
     };
-    plugin.set("Bipolar Stretch", -100);
+    plugin.set("Stretch", -10000);
     draw();
     if (!drawnTextContains("-1.0x")) return false;
-    plugin.set("Bipolar Stretch", -50);
+    plugin.set("Stretch", 0);
     draw();
     if (!drawnTextContains("FREEZE")) return false;
     _NT_uiData bank{};
     bank.controls = kNT_potButtonL;
     plugin.ui(bank);
-    plugin.set("Bipolar Pitch", -100);
+    plugin.set("Pitch", -10000);
     draw();
     if (!drawnTextContains("-2.00x")) return false;
-    plugin.set("Bipolar Pitch", -50);
+    plugin.set("Pitch", 0);
     draw();
     if (!drawnTextContains("HOLD")) return false;
-    plugin.set("Bipolar Pitch", 0);
+    plugin.set("Pitch", 5000);
     draw();
-    return drawnTextContains("+0.0 st");
+    return drawnTextContains("+1.00x");
 }
 
 bool testInactiveFolderPreservesLiveAudio() {
     HostPlugin uninterrupted, browsing;
     for (HostPlugin* plugin : {&uninterrupted, &browsing}) {
         plugin->set("Right input", 0);
-        plugin->set("Stretch", 80);
+        plugin->set("Stretch", 2000);
         plugin->set("Threshold", 100);
         plugin->set("Drive Character", 5000);
         plugin->set("Grain Size", 4096);
@@ -606,7 +863,7 @@ bool testInactiveFolderPreservesLiveAudio() {
 }
 
 bool testPotBankRequiresPickup() {
-    HostPlugin plugin;
+    HostPlugin plugin(false);
     _NT_uiData event{};
     event.controls = kNT_potL;
     plugin.ui(event); // MAIN: Stretch at its physical minimum.
@@ -622,10 +879,10 @@ bool testPotBankRequiresPickup() {
     if (plugin.values[plugin.parameter("Pitch")] != 0) return false;
     event.pots[0] = 0.6f; // Cross the saved midpoint in one update.
     plugin.ui(event);
-    if (plugin.values[plugin.parameter("Pitch")] != 24) return false;
+    if (plugin.values[plugin.parameter("Pitch")] != 2000) return false;
     event.pots[0] = 0.7f;
     plugin.ui(event);
-    if (plugin.values[plugin.parameter("Pitch")] != 48) return false;
+    if (plugin.values[plugin.parameter("Pitch")] != 4000) return false;
     event.controls = kNT_potC;
     event.pots[1] = 0.9f; // Other pots remain independently locked.
     plugin.ui(event);
@@ -635,12 +892,12 @@ bool testPotBankRequiresPickup() {
     event.controls = kNT_potL;
     event.pots[0] = 0.6f;
     plugin.ui(event); // Switching back must pick up MAIN again.
-    if (plugin.values[plugin.parameter("Stretch")] != 0) return false;
+    if (plugin.values[plugin.parameter("Stretch")] != -10000) return false;
     event.pots[0] = 0.0f;
     plugin.ui(event);
     event.pots[0] = 0.1f;
     plugin.ui(event);
-    return plugin.values[plugin.parameter("Stretch")] == 10;
+    return plugin.values[plugin.parameter("Stretch")] == -8000;
 }
 
 bool testShorterPhysicalSamplesKeepLooping() {
@@ -753,7 +1010,7 @@ bool testSliceDuringSdStartupPreservesWetAudio() {
     HostPlugin reference, sliced;
     gStreamInitialEmptyRenders = 100;
     for (HostPlugin* plugin : {&reference, &sliced}) {
-        plugin->set("Pitch", 120);
+        plugin->set("Pitch", 10000);
         plugin->set("Source", 1);
     }
     double energy = 0.0;
@@ -940,6 +1197,8 @@ int main() {
     values[grain] = 128;
     values[quality] = 100;
     values[mix] = 100;
+    values[pitch] = 5000;
+    values[stretch] = 10000;
     algorithm->v = values.data();
 
     // The host persists ordinary parameter values in its preset. Recreate a
@@ -1016,8 +1275,8 @@ int main() {
     factory->customUi(algorithm, ui);
     gDrawnText.clear();
     factory->draw(algorithm);
-    if (values[stretch] != 50 || !drawnTextContains("5.7x")) {
-        return fail("Stretch midpoint did not show its upstream time factor");
+    if (values[stretch] != 0 || !drawnTextContains("FREEZE")) {
+        return fail("Stretch midpoint did not show freeze");
     }
     ui = {};
     ui.controls = kNT_potL;
@@ -1025,8 +1284,8 @@ int main() {
     factory->customUi(algorithm, ui);
     gDrawnText.clear();
     factory->draw(algorithm);
-    if (values[stretch] != 100 || !drawnTextContains("FREEZE")) {
-        return fail("maximum Stretch did not show its true freeze state");
+    if (values[stretch] != 10000 || !drawnTextContains("1.0x")) {
+        return fail("maximum Stretch did not show forward unity");
     }
     ui = {};
     ui.controls = kNT_potButtonL;
@@ -1038,13 +1297,13 @@ int main() {
     factory->customUi(algorithm, ui);
     ui.pots[0] = 0.75f;
     factory->customUi(algorithm, ui);
-    if (values[pitch] != 60) {
+    if (values[pitch] != 5000) {
         return fail("alternate performance pot did not control Pitch");
     }
     gDrawnText.clear();
     factory->draw(algorithm);
     if (!drawnTextContains("PITCH") ||
-        !drawnTextContains("+6.0 st") || !drawnTextContains("GRAIN") ||
+        !drawnTextContains("+1.00x") || !drawnTextContains("GRAIN") ||
         !drawnTextContains("QUALITY") || drawnTextContains("ALT")) {
         return fail("alternate pot functions did not show their identity and value");
     }
@@ -1054,7 +1313,7 @@ int main() {
     factory->customUi(algorithm, ui);
     gDrawnText.clear();
     factory->draw(algorithm);
-    if (values[pitch] != -60 || !drawnTextContains("-6.0 st")) {
+    if (values[pitch] != -5000 || !drawnTextContains("-1.00x")) {
         return fail("negative Pitch value did not update on the performance screen");
     }
     // The NT may publish an NT_setParameterFromUi() value after the custom UI
@@ -1067,8 +1326,8 @@ int main() {
     factory->customUi(algorithm, ui);
     gDrawnText.clear();
     factory->draw(algorithm);
-    if (values[pitch] != -60 || !drawnTextContains("+3.0 st") ||
-        gPendingParameter != pitch || gPendingParameterValue != 30) {
+    if (values[pitch] != -5000 || !drawnTextContains("+0.50x") ||
+        gPendingParameter != pitch || gPendingParameterValue != 2500) {
         return fail("Pitch display waited for the host pot-value commit");
     }
     gDeferParameterUiCommit = false;
@@ -1105,8 +1364,8 @@ int main() {
         return fail("right encoder did not control Mix");
     }
     // Restore neutral processing for source-path assertions below.
-    values[pitch] = 0;
-    values[stretch] = 0;
+    values[pitch] = 5000;
+    values[stretch] = 10000;
     values[mix] = 100;
     factory->parameterChanged(algorithm, pitch);
     factory->parameterChanged(algorithm, stretch);
@@ -1173,6 +1432,8 @@ int main() {
         for (int parameter : auditedControls) {
             values[parameter] = algorithm->parameters[parameter].def;
         }
+        values[pitch] = 5000;
+        values[stretch] = 10000;
     }
     std::fill(buses.begin(), buses.end(), 0.0f);
 
@@ -2070,8 +2331,14 @@ int main() {
     if (!testReleasedParameterAndPagePrefixes()) {
         return fail("released parameter metadata/page prefixes changed");
     }
-    if (!testOldPresetVectorKeepsCenteredDefaults()) {
-        return fail("old preset vector did not preserve centered processing defaults");
+    if (!testUnversionedPresetMigratesToNewAudioAndCvBehavior()) {
+        return fail("unversioned presets did not adopt the new audio/CV behavior");
+    }
+    if (!testPresetFormatRoundTripsAndRejectsMalformedData()) {
+        return fail("preset format roundtrip or transactional validation failed");
+    }
+    if (!testDeferredMigrationUsesBaseValuesAndCommonOffset()) {
+        return fail("deferred preset migration changed a mapped base or common offset");
     }
     if (!testBipolarMappedValuesApplyWithoutCallbacks()) {
         return fail("bipolar mapped controls failed in Live or Sample");

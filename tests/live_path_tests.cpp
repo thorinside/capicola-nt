@@ -4,7 +4,7 @@
 #include <limits>
 
 #include "capicola_nt/int64_to_double.h"
-#include "capicola_nt/bipolar_mapping.h"
+#include "capicola_nt/preset_format.h"
 #include "capicola_nt/live_path.h"
 
 namespace {
@@ -29,30 +29,29 @@ public:
     }
 };
 
-void testBipolarMappingPreservesLegacyAndStopsExactly() {
-    struct Fixture { float base; int position; float limit; float expected; };
-    const Fixture fixtures[] = {
-        {0.5f, 0, 2.0f, 0.5f}, {1.0f, 0, 2.0f, 1.0f},
-        {2.0f, 0, 2.0f, 2.0f}, {0.0f, 0, 1.0f, 0.0f},
-        {0.1767767f, 0, 1.0f, 0.1767767f},
-        {1.0f, -100, 2.0f, -2.0f}, {0.5f, -75, 2.0f, -1.0f},
-        {2.0f, -50, 2.0f, 0.0f}, {0.5f, -25, 2.0f, 0.25f},
-        {1.0f, 50, 2.0f, 1.5f}, {0.5f, 100, 2.0f, 2.0f},
-        {0.0f, -100, 1.0f, -1.0f}, {1.0f, -50, 1.0f, 0.0f},
-        {0.5f, -25, 1.0f, 0.25f}, {0.0f, 50, 1.0f, 0.5f},
-        {0.0f, 100, 1.0f, 1.0f},
-    };
-    for (const auto& fixture : fixtures) {
-        CHECK(capicola_nt::bipolarRate(fixture.base, fixture.position,
-                                      fixture.limit) == fixture.expected);
-    }
+void testBipolarRatesAndOneTimeRangeConversion() {
+    using namespace capicola_nt;
+    CHECK(bipolarPitchRate(-10000) == -2.0f);
+    CHECK(bipolarPitchRate(0) == 0.0f);
+    CHECK(bipolarPitchRate(5000) == 1.0f);
+    CHECK(bipolarPitchRate(10000) == 2.0f);
+    CHECK(bipolarStretchRate(-10000) == -1.0f);
+    CHECK(bipolarStretchRate(0) == 0.0f);
+    CHECK(bipolarStretchRate(10000) == 1.0f);
+    CHECK(bipolarStretchRate(-5000) == -std::pow(0.5f, 2.5f));
+    CHECK(bipolarStretchRate(10100) == 1.0f);
+    CHECK(pitchValueFromLegacy(-120) == -10000);
+    CHECK(pitchValueFromLegacy(0) == 0);
+    CHECK(pitchValueFromLegacy(120) == 10000);
     for (int pitch = -120; pitch <= 120; ++pitch) {
-        const float legacy = std::exp2(static_cast<float>(pitch) * 0.1f / 12.0f);
-        CHECK(capicola_nt::bipolarRate(legacy, 0, 2.0f) == legacy);
+        const int converted = pitchValueFromLegacy(pitch);
+        CHECK(std::fabs(converted - pitch * (10000.0 / 120.0)) <= 0.5);
+        CHECK(converted == -pitchValueFromLegacy(-pitch));
+        CHECK(pitch == 120 || converted < pitchValueFromLegacy(pitch + 1));
     }
     for (int stretch = 0; stretch <= 100; ++stretch) {
-        const float legacy = std::pow(1.0f - stretch * 0.01f, 2.5f);
-        CHECK(capicola_nt::bipolarRate(legacy, 0, 1.0f) == legacy);
+        const int converted = stretchValueFromLegacy(stretch);
+        CHECK(converted == 200 * stretch - 10000);
     }
 }
 
@@ -429,7 +428,7 @@ void testFarSparseWindowSeekUsesBoundedFallback() {
 } // namespace
 
 int main() {
-    testBipolarMappingPreservesLegacyAndStopsExactly();
+    testBipolarRatesAndOneTimeRangeConversion();
     testTransientPulseDoesNotRetriggerOrPause();
     testManualSlicePulseAcrossBlocksAndColdReset();
     testOutputFollowerPulseKeepsSampleTiming();

@@ -14,14 +14,24 @@ ALLOWED_UNDEFINED = {
     "NT_getNumSampleFolders",
     "NT_getSampleFileInfo",
     "NT_getSampleFolderInfo",
+    "NT_getSlot",
     "NT_globals",
     "NT_isSdCardMounted",
     "NT_parameterOffset",
     "NT_setParameterFromUi",
+    "NT_setParameterFromAudio",
     "NT_streamOpen",
     "NT_streamRender",
     "NT_updateParameterDefinition",
     "_GLOBAL_OFFSET_TABLE_",
+    # Exact serialization/slot imports from the pinned API v13 SDK.
+    "_ZN13_NT_jsonParse10skipMemberEv",
+    "_ZN13_NT_jsonParse21numberOfObjectMembersERi",
+    "_ZN13_NT_jsonParse6numberERi",
+    "_ZN13_NT_jsonParse9matchNameEPKc",
+    "_ZN14_NT_jsonStream13addMemberNameEPKc",
+    "_ZN14_NT_jsonStream9addNumberEi",
+    "_ZNK8_NT_slot20parameterPresetValueEm",
     "exp2f",
     "memcpy",
     "memset",
@@ -39,6 +49,8 @@ LOADER_CALLBACKS = {
     "construct(",
     "customUi(",
     "draw(",
+    "serialise(",
+    "deserialise(",
     "hasCustomUi(",
     "parameterChanged(",
     "parameterString(",
@@ -83,7 +95,7 @@ def main() -> int:
             if callback == "pluginEntry":
                 matches = name == callback
             else:
-                matches = callback in name
+                matches = f"::{callback}" in name
             if matches:
                 callback_sections[callback] = section
 

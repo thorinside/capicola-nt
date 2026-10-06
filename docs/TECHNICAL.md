@@ -5,9 +5,8 @@ should start with the [installation and user guide](../README.md).
 
 ## Released implementation
 
-The current published binary is
-[`v0.6.0`](https://github.com/thorinside/capicola-nt/releases/tag/v0.6.0).
-See the [release notes](RELEASE_NOTES.md) for the upstream v1.0 DSP update.
+This source targets v0.6.1. See the [release notes](RELEASE_NOTES.md) for its
+reused bipolar controls, preset conversion and the upstream v1.0 DSP update.
 
 | Item | Value |
 | --- | --- |
@@ -91,7 +90,7 @@ with a sample stem limited to 32 characters using a middle ellipsis; repeated
 trailing audio extensions are removed. During a prepared replacement, the title
 continues naming the audible old stream until the zero-gain handoff. The footer
 contains only Mix, with analysis activity left to the optional CV outputs.
-Stretch retains the upstream taper but is rendered as a time factor or
+Stretch uses the signed upstream magnitude taper and is rendered as a time factor or
 **FREEZE**. Pot-originated values are
 mirrored immediately for display while the host commits the parameter update.
 After an internal pot-bank change, each pot waits until its physical position
@@ -104,29 +103,45 @@ remain ordinary host parameters on the Performance page. Input Gain is appended
 to the underlying parameter array so every released parameter index remains
 preset-stable.
 
-Upstream v1.0 supports signed pitch-head and stretch-grid rates. The appended
-**Bipolar Pitch** and **Bipolar Stretch** parameters occupy indices 26 and 27,
-range from -100 to +100%, and default to 0%. The 26 earlier definitions and all
-earlier page entries remain unchanged; the new controls are appended to
-Performance. Legacy Pitch remains `exp2(semitones/12)`, Stretch remains
-`(1-x)^2.5`, and Quality retains epsilon 0.1–0.001 even though upstream's new
-panel uses 0.03–0.001. There is no extra mode, custom preset format or bank.
+Upstream v1.0 supports signed pitch-head and stretch-grid rates. **Pitch** and
+**Stretch** reuse indices 9 and 10, with raw ranges -10000…10000, percentage
+units scaled by 100, and center defaults of 0. Pitch rate is `raw * 0.0002`;
+Stretch rate is `sign(raw) * pow(abs(raw) * 0.0001, 2.5)`. Both clamp to their
+declared range. The custom screen retains its two banks and shows signed pitch
+rates or **HOLD**, and signed stretch time factors or **FREEZE**. Rate changes
+do not reset the warm processor. The file stream still advances forward.
+Quality retains epsilon 0.1–0.001 even though upstream's new panel uses
+0.03–0.001. The other 24 definitions and every pre-v0.6.0 parameter/page index
+remain unchanged. The v0.6.0 appended slots 26 and 27 are removed.
 
-For legacy rate `b`, signed limit `L` (2 for Pitch, 1 for Stretch), and raw
-position `p`, the piecewise rate is:
+The plug-in writes `capicolaFormatVersion: 2` into its custom preset data.
+Missing custom data or a missing marker means original format 1. The one-time
+affine conversion uses saved base values, obtained from
+`_NT_slot::parameterPresetValue()` with `NT_parameterOffset()`:
 
-- -100 ≤ p ≤ -50: `L * (p + 50) / 50`;
-- -50 < p < 0: `b * (p + 50) / 50`;
-- p = 0: exactly `b`;
-- 0 < p ≤ 100: `b + (L - b) * p / 100`.
+- Pitch: `round(clamp(oldRaw, -120, 120) * 10000 / 120)`;
+- Stretch: `clamp(oldRaw, 0, 100) * 200 - 10000`.
 
-Thus -50% is an exactly selectable stop, center preserves any old preset rate,
-and the endpoints reach full reverse/forward. The same mapping runs for host
-callbacks and effective `v[]` changes in step, across both sources. Rate changes
-do not reset the warm processor. The custom screen preserves its controls but
-shows a negative stretch factor for reverse, **FREEZE** for a stopped grid, and
-signed pitch rates or **HOLD** when Bipolar Pitch is active. The file stream
-itself still advances forward.
+Rounding is symmetric to the nearest integer. These formulas preserve range
+position. All presets then use the new bipolar rates and CV behavior; there is
+no stored old taper or compatibility interpretation. Host mapping settings are
+left in place and now operate on the new parameter definitions.
+
+Deserialization only records the format. Conversion is deferred to `step()`
+so custom-state restoration can precede or follow parameter restoration.
+The new ranges contain every old raw value, avoiding premature host clipping.
+Host setters are issued once and may commit immediately or on a later block.
+During a pending write the same new rate calculation uses the converted target
+plus the current raw mapping offset. A save during that brief transition also
+writes `migrationPitchTarget` and/or `migrationStretchTarget`; reload completes
+those writes without converting twice. After commit, only the format marker
+remains. No public mode or extra parameter is added.
+
+The pinned SDK does not specify whether an old preset without custom data
+always invokes `deserialise()`, or formally guarantee that all parameter
+restoration completes before the first audio step. The migration tests exercise
+both restore orders and absent custom data under that hook contract. Actual
+firmware 1.16.0 preset loading has not been verified on hardware.
 
 The transient adapter follows upstream v1.0's event semantics. An accepted
 natural slice or valid manual Slice fires one block-quantized input pulse;
@@ -180,10 +195,11 @@ verifies that it is an ELF32 little-endian ARM relocatable object exporting
 The upstream suite runs against both the untouched vendor headers and the NT
 overlay, including reverse grid movement, backward-head fade completion,
 back-edge re-anchoring, direction-change bounds, detector holdoff and small-ring
-fuzz. Factory tests check literal metadata/page prefixes, old 26-value vectors
-with defaulted appended fields, mapped rate changes, source transitions and
-pulse boundaries. These are host tests, not physical firmware preset loading or
-listening validation; neither was performed for v0.6.0.
+fuzz. Factory tests check the 26 metadata/page positions, one-time conversion of
+old values, both custom-state/parameter restore orders, new mapped-rate behavior
+in both sources, immediate/deferred host writes, versioned save/reload, malformed
+custom data, source transitions and pulse boundaries. These are host tests;
+physical firmware preset loading and listening remain unverified.
 
 To prepare both public release assets:
 

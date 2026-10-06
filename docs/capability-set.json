@@ -19,25 +19,25 @@
     {
       "id": "pitch",
       "label": "Pitch",
-      "range": "legacy -12 to +12 semitones, extended by an appended -100 to +100% bipolar control to signed head rates -2 to +2",
+      "range": "-100 to +100% bipolar control, signed head rates -2 to +2, center=hold",
       "upstreamEvidence": [
         "vendor/capicola/src/main.cpp:VirtualKnob pitch",
         "vendor/capicola/src/audio/audio_engine.cpp:AudioEngine::SetSlicePitch",
         "vendor/capicola/lib/KeyframeRecorder.h:void SetGrainPitch"
       ],
-      "ntLimit": "Legacy Pitch retains its range, default, index and 0.1-semitone steps. Appended Bipolar Pitch defaults to 0%, preserving the legacy rate; -50% stops the head, -100% selects -2, +100% selects +2. Shared stereo rate, ordinary NT parameter mapping; no additional mode or transport control."
+      "ntLimit": "Original index 9 is reused, raw -10000 to +10000 with percentage scaling 100 and default 0. Rate=raw*0.0002. Unversioned saved raw -120 to +120 values map linearly into the new range once; all presets then use the new behavior and ordinary NT parameter mapping. Format version 2 prevents repeat conversion. Shared stereo rate; no public mode or transport control."
     },
     {
       "id": "stretch",
       "label": "Stretch",
-      "range": "legacy (1-x)^2.5 real-time-to-freeze taper, extended by an appended -100 to +100% bipolar control to signed grid rates -1 to +1",
+      "range": "-100 to +100% bipolar control, signed grid rates -1 to +1, center=freeze",
       "upstreamEvidence": [
         "vendor/capicola/src/main.cpp:VirtualKnob stretch",
         "vendor/capicola/src/main.cpp:StretchMag",
         "vendor/capicola/src/audio/audio_engine.cpp:AudioEngine::SetSliceStretch",
         "vendor/capicola/lib/Granule.h:void SetStretch"
       ],
-      "ntLimit": "Legacy Stretch retains its range, default, index and taper. Appended Bipolar Stretch defaults to 0%, preserving the legacy rate; -50% freezes the grid, -100% selects -1, +100% selects +1. Both sources share the stereo DSP; SD-file streaming remains forward."
+      "ntLimit": "Original index 10 is reused, raw -10000 to +10000 with percentage scaling 100 and default 0. Rate=sign(raw)*pow(abs(raw)*0.0001,2.5). Unversioned saved raw 0 to 100 values map linearly into the new range once; all presets then use the new behavior and ordinary NT parameter mapping. Both sources share the stereo DSP; SD-file streaming remains forward."
     },
     {
       "id": "transientThreshold",

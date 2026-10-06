@@ -30,7 +30,7 @@ Opening a valid replacement sample preserves the already-warm Capicola engine. T
 
 ## Presets, remounts, and unavailable samples
 
-`Source`, `Folder`, and `Sample` are ordinary NT parameters, so the host stores and restores them with the rest of a preset; Capicola adds no separate file database or custom preset format. On a fresh Sample-mode instance, the host's restored parameter callbacks reopen a valid saved selection exactly once, even when the host notifies all three parameters. If restoration happens before its file is available, the screen remains at **CAPICOLA WAIT**; reopen the selector and press **LOAD** after the catalogue is ready.
+`Source`, `Folder`, and `Sample` are ordinary NT parameters, so the host stores and restores them with the rest of a preset. Capicola also saves an internal version marker for the one-time Pitch/Stretch range conversion; it adds no separate file database. On a fresh Sample-mode instance, the host's restored parameter callbacks reopen a valid saved selection exactly once, even when the host notifies all three parameters. If restoration happens before its file is available, the screen remains at **CAPICOLA WAIT**; reopen the selector and press **LOAD** after the catalogue is ready.
 
 For real-time safety, the audio callback never scans the catalogue, changes parameter definitions, allocates memory, or performs unbounded recovery. Its only SD operation is `NT_streamRender()` and at most one `NT_streamOpen()` per block for looping or the stalled-stream recovery described above. Reaching the reported count alone never triggers a reopen while the renderer continues supplying frames. A short read before that boundary leaves the affected remainder silent and the next block may retry; reaching 100 ms without progress permits a restart. Removing the card interrupts streaming. After inserting or remounting it, press **LOAD** in the sample selector if playback does not resume.
 
@@ -40,7 +40,7 @@ If the saved Folder catalogue entry is missing or moved so its index is no longe
 
 Mono files are delivered by the host stream as stereo and therefore feed
 identical left and right Capicola channels. Stereo files retain left/right
-order. The SD-file stream stays forward, while Bipolar Pitch and Bipolar Stretch
+order. The SD-file stream stays forward, while Pitch and Stretch
 can reverse the captured DSP history. The wrapper adds no reverse file
 transport, scrub, region, chopping, polyphony, recording, or live/sample mix.
 
@@ -64,15 +64,18 @@ No separate module buttons are claimed by the custom UI. All twelve upstream con
 - **Drive Character:** 0.00% quake, 50.00% clean, 100.00% sinc; default 100.00%.
 - **Feedback Tone:** 0.00–100.00% maps exponentially to normalized bandpass center 0.002–0.9 (about 48 Hz–21.6 kHz at 48 kHz); default 37.69% (about 0.02).
 
-These controls use the exact audited upstream sweep equations, are shared by the left and right Capicola channels (Feedback Tone controls both feedback filters), and affect Live and Sample through the same processing path. The existing controls retain their audited ranges and tapers: Pitch ±12 semitones, Stretch realtime-to-freeze `(1-x)^2.5`, Threshold ratio 0–8/top=mute, Grain Size 32–4096 keyframes, Quality ε 0.1–0.001, Feedback 0–1.5, and Mix dry-to-wet. The Stretch value is displayed as its time factor (about 5.7× at midpoint) and **FREEZE** at the clockwise stop. For an uninterrupted long stretch, use 100% Mix and 100% Threshold: lower Threshold values intentionally accept transients that catch the read head up to the current source. A larger Grain Size increases the distance between adaptive splices but does not extend the maximum beyond freeze. Together with the right-encoder **Slice** action, the interface represents all 13 audited upstream processing capabilities; Input Gain is NT wrapper gain staging, not a new DSP capability.
+These secondary controls use the audited upstream sweep equations, are shared by the left and right Capicola channels (Feedback Tone controls both feedback filters), and affect Live and Sample through the same processing path. Threshold retains ratio 0–8/top=mute, Grain Size 32–4096 keyframes, Quality ε 0.1–0.001, Feedback 0–1.5, and Mix dry-to-wet. Pitch and Stretch use bipolar ranges as described below. For an uninterrupted long stretch, use 100% Mix and 100% Threshold: lower Threshold values intentionally accept transients that catch the read head up to the current source. A larger Grain Size increases the distance between adaptive splices. Together with the right-encoder **Slice** action, the interface represents all 13 audited upstream processing capabilities; Input Gain is NT wrapper gain staging, not a new DSP capability.
 
 ## Processing and routing
 
-The two appended bipolar controls are available through the ordinary Performance
-parameter page and NT mapping. Both default to 0%, preserving legacy Pitch and
-Stretch. -50% stops the pitch head or freezes the stretch grid; -100% selects
-full reverse (-2× pitch, -1× stretch), while +100% selects the forward limit.
-The persistent UI retains its pot banks and shows the effective direction,
-freeze or pitch hold when these controls are active.
+Pitch and Stretch reuse their original Performance page positions and NT
+mapping. Both default to 0%: the pitch head holds and the stretch grid freezes.
+Negative values reverse the captured history; -100% reaches -2× pitch or -1×
+stretch, while +100% reaches the forward limit. Forward unity is Pitch +50%,
+Stretch +100%. The persistent UI retains its pot banks and shows direction,
+freeze or pitch hold. Unversioned saved values receive a one-time linear range
+conversion; converted presets then use the same new rates and CV behavior as
+fresh presets. See [the technical reference](TECHNICAL.md) for the formulas and
+the firmware hook assumptions covered by host tests.
 
 Both source modes enter the same stereo-linked Capicola processing path and use the same confirmed controls, audio outputs, and Add/Replace output modes. At 0 dB Input Gain and 0% Mix, either source retains its existing dry output level through the normalized DSP boundary once a source transition has completed. The upstream stereo guard is retained: if exactly one channel automatically catches a transient and the source-grid lags differ by more than 48,000 frames (one second at 48 kHz), the other channel receives a Slice for its next block. Below that threshold the channels remain independent. Source replacement resets the engine, reapplies the current processing values, and bridges the output over 10 ms as described above. These wrapper fixes do not expand the audited processing-capability set or make sample playback an upstream Capicola sampler feature.
