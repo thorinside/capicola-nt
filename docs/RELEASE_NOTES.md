@@ -10,27 +10,27 @@ taper `sign(x) * abs(x)^2.5`. Forward unity is Pitch +50%, Stretch +100%.
 
 - Removes the two appended v0.6.0 bipolar controls. All 26 pre-v0.6.0 parameter
   indices and page positions remain; the other 24 definitions are unchanged.
-- Treats unversioned presets as original format 1 and saves format version 2.
+- Defaults unversioned presets to original format 1, including presets with no
+  custom data. Every save carries a version tag matching its stored values.
   Old Pitch -12…+12 semitones maps linearly to -100…+100%; old Stretch 0…100%
   maps linearly to -100…+100%. Old center Pitch becomes Hold, while old Stretch
   0/50/100 becomes reverse/freeze/forward. Converted presets use the new sound
   and CV response.
-- Initializes converted BASE values at the first valid audio callback, before
-  DSP processing begins. Parameter and custom-state loading have completed by
-  that point. Deserialization records the format without host reads or setters.
-  Conversion happens once; saved format2 presets and later edits use native
-  bipolar values. Presets store only the version marker.
+- Converts old values once before the first audio block. Fresh instances start
+  at center, and saved format 2 presets and later edits use native bipolar
+  values. Saving before the first audio block also reloads correctly.
 - Retains the upstream v1.0 DSP fixes and event-based transient outputs from
   v0.6.0. v0.6.0 preset compatibility is explicitly outside this update's scope;
   its published tag and assets remain intact.
 
 Validation: strict host DSP and factory integration suites, both restoration
-orders before operation, one-time range conversion, mapped CV and save/reload
-regressions, capability/license audits, and an inspected Cortex-M7 ARM object.
+orders before operation, original presets with no custom-data callback, fresh
+defaults, one-time range conversion, mapped CV and save/reload before and after
+the first audio block, capability/license audits, and an inspected Cortex-M7
+ARM object.
 Firmware 1.16.0, API v13 and 48 kHz remain the baseline. Physical NT preset loading
 and listening have not been performed. The technical reference distinguishes the
-owner-supplied inactive-load lifecycle from the SDK's callback permissions and
-records the absent-custom-state callback convention.
+owner-supplied inactive-load lifecycle from the SDK's callback permissions.
 
 ## v0.6.0
 

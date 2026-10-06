@@ -2,6 +2,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -395,7 +396,10 @@ struct HostPlugin {
         set("Right output mode", 1);
         // Most source-path tests need unity processing. Tests of actual fresh
         // defaults explicitly opt out, so the center stop/freeze stays tested.
-        if (unity) { set("Pitch", 5000); set("Stretch", 10000); }
+        if (unity) {
+            if (!useNativeFormat()) std::abort();
+            set("Pitch", 5000); set("Stretch", 10000);
+        }
     }
 
     void activate() { gAlgorithm = algorithm; gFactory = factory; }
@@ -432,6 +436,20 @@ struct HostPlugin {
         if (gSlotReads != reads || gAudioParameterWrites != writes) return false;
         return result;
     }
+    bool useNativeFormat() {
+        HostJson json{true, {{"capicolaFormatVersion", 2}}, ""};
+        return restore(json, true);
+    }
+    bool loadParameters(const std::vector<int16_t>& saved) {
+        if (saved.size() != values.size()) return false;
+        std::copy(saved.begin(), saved.end(), values.begin());
+        std::copy(saved.begin(), saved.end(), baseValues.begin());
+        activate();
+        for (uint32_t i = 0; i < requirements.numParameters; ++i) {
+            factory->parameterChanged(algorithm, i);
+        }
+        return true;
+    }
     HostJson save() {
         activate();
         HostJson json;
@@ -450,6 +468,9 @@ struct HostPlugin {
 
 bool testReleasedParameterAndPagePrefixes() {
     HostPlugin plugin(false);
+    if (plugin.values[9] != 0 || plugin.values[10] != 50 ||
+        plugin.algorithm->parameters[10].def != 50) return false;
+    plugin.step();
     struct Definition { const char* name; int min, max, def, unit, scaling; };
     const Definition released[] = {
         {"Left input", 1, 64, 1, kNT_unitAudioInput, 0},
@@ -512,15 +533,18 @@ bool testReleasedParameterAndPagePrefixes() {
 
 bool testUnversionedPresetMigratesToNewAudioAndCvBehavior() {
     for (int source : {0, 1}) {
-      for (bool customFirst : {false, true}) {
+      // Original releases saved no custom data. Exercise a skipped callback,
+      // as well as empty custom data before or after generic parameters.
+      for (int customOrder : {0, 1, 2}) {
         HostPlugin restored(false), reference(false);
+        if (!reference.useNativeFormat()) return false;
         // Literal v0.5.3 vector, copied into a newly defaulted factory instance.
         const int16_t preset[] = {
             1,0,13,1,14,1,static_cast<int16_t>(source),0,1,35,70,100,
             128,92,45,4259,2153,1429,5000,100,3769,0,0,0,0,-6,
         };
         HostJson unversioned;
-        if (customFirst && !restored.restore(unversioned, true)) return false;
+        if (customOrder == 1 && !restored.restore(unversioned, true)) return false;
         std::copy(preset, preset + 26, restored.values.begin());
         std::copy(preset, preset + 26, restored.baseValues.begin());
         for (int i = 0; i < 26; ++i) {
@@ -531,7 +555,7 @@ bool testUnversionedPresetMigratesToNewAudioAndCvBehavior() {
             if (i != 6) reference.set(reference.algorithm->parameters[i].name, value);
         }
         reference.set("Source", source);
-        if (!customFirst && !restored.restore(unversioned)) return false;
+        if (customOrder == 2 && !restored.restore(unversioned)) return false;
         // The reference is a fresh format-2 instance configured with the new
         // bipolar values. Restored presets must use exactly this behavior.
         double energy = 0.0;
@@ -565,11 +589,12 @@ bool testPresetFormatRoundTripsAndRejectsMalformedData() {
     HostPlugin fresh(false);
     HostJson saved = fresh.save();
     if (saved.members.size() != 1 || saved.members[0].name != "capicolaFormatVersion" ||
-        saved.members[0].value != 2) return false;
-    // Explicitly versioned center must never turn into the old forward unity.
+        saved.members[0].value != 1) return false;
+    // A save before first operation preserves its old-domain initialization.
     if (!fresh.restore(saved, true)) return false;
     fresh.step();
-    if (fresh.baseValues[9] != 0 || fresh.baseValues[10] != 0) return false;
+    if (fresh.baseValues[9] != 0 || fresh.baseValues[10] != 0 ||
+        fresh.save().members[0].value != 2) return false;
     for (bool customFirst : {false, true}) {
         HostPlugin legacy(false), reloaded(false);
         legacy.set("Pitch", -120);
@@ -622,8 +647,75 @@ bool testPresetFormatRoundTripsAndRejectsMalformedData() {
     return fresh.restore(withUnknown, true);
 }
 
+bool testDefaultOldFormatAndSaveBeforeFirstStep() {
+    // Fresh and old loaded values can both be saved while loading is inactive.
+    // Every save must identify the range actually used by its BASE values.
+    for (bool oldPreset : {false, true}) {
+      for (bool initialized : {false, true}) {
+        HostPlugin savedPlugin(false);
+        if (oldPreset) {
+            savedPlugin.set("Pitch", 35);
+            savedPlugin.set("Stretch", 70);
+        }
+        if (initialized) savedPlugin.step();
+        const std::vector<int16_t> savedBases = savedPlugin.baseValues;
+        HostJson saved = savedPlugin.save();
+        if (saved.members.size() != 1 ||
+            saved.members[0].name != "capicolaFormatVersion" ||
+            saved.members[0].value != (initialized ? 2 : 1)) return false;
+        for (bool customFirst : {false, true}) {
+            HostPlugin reloaded(false);
+            if (customFirst && !reloaded.restore(saved, true)) return false;
+            if (!reloaded.loadParameters(savedBases)) return false;
+            if (!customFirst && !reloaded.restore(saved)) return false;
+            const uint32_t writes = gAudioParameterWrites;
+            const uint32_t definitions = gParameterDefinitionUpdates;
+            reloaded.step();
+            if (reloaded.baseValues[9] != (oldPreset ? 2917 : 0) ||
+                reloaded.baseValues[10] != (oldPreset ? 4000 : 0) ||
+                reloaded.values != reloaded.baseValues ||
+                reloaded.algorithm->parameters[9].def != 0 ||
+                reloaded.algorithm->parameters[10].def != 0 ||
+                gAudioParameterWrites != writes + (initialized ? 0 : 2) ||
+                gParameterDefinitionUpdates != definitions + 1 ||
+                reloaded.save().members[0].value != 2) return false;
+            reloaded.step();
+            if (gAudioParameterWrites != writes + (initialized ? 0 : 2) ||
+                gParameterDefinitionUpdates != definitions + 1) return false;
+        }
+      }
+    }
+    // The tag overrides OLD even when native numbers overlap the old range.
+    // Normalizing the public default must not alter any restored native BASE.
+    for (bool customFirst : {false, true}) {
+        HostPlugin tagged(false);
+        HostJson native{true, {{"capicolaFormatVersion", 2}}, ""};
+        if (customFirst && !tagged.restore(native, true)) return false;
+        tagged.set("Pitch", -4500);
+        tagged.set("Stretch", 70);
+        if (!customFirst && !tagged.restore(native)) return false;
+        const uint32_t writes = gAudioParameterWrites;
+        tagged.step();
+        if (tagged.baseValues[9] != -4500 || tagged.baseValues[10] != 70 ||
+            tagged.algorithm->parameters[10].def != 0 ||
+            gAudioParameterWrites != writes) return false;
+        // Source/processor resets preserve the completed format. Default resets
+        // subsequently use native center values and never convert again.
+        tagged.set("Source", 1); tagged.step();
+        tagged.set("Source", 0); tagged.step();
+        tagged.set("Pitch", tagged.algorithm->parameters[9].def);
+        tagged.set("Stretch", tagged.algorithm->parameters[10].def);
+        tagged.step();
+        if (tagged.baseValues[9] != 0 || tagged.baseValues[10] != 0 ||
+            gAudioParameterWrites != writes || tagged.save().members[0].value != 2)
+            return false;
+    }
+    return true;
+}
+
 bool testMigrationUsesBaseValuesAndCommonOffset() {
     HostPlugin plugin(false), reference(false);
+    if (!reference.useNativeFormat()) return false;
     // Loading restores BASE and custom data while the plugin is inactive.
     // The first valid step initializes the ranges before normal processing.
     plugin.set("Pitch", 35);
@@ -878,6 +970,7 @@ bool testInactiveFolderPreservesLiveAudio() {
 
 bool testPotBankRequiresPickup() {
     HostPlugin plugin(false);
+    plugin.step();
     _NT_uiData event{};
     event.controls = kNT_potL;
     plugin.ui(event); // MAIN: Stretch at its physical minimum.
@@ -1214,6 +1307,11 @@ int main() {
     values[pitch] = 5000;
     values[stretch] = 10000;
     algorithm->v = values.data();
+    HostJson nativeState{true, {{"capicolaFormatVersion", 2}}, ""};
+    _NT_jsonParse nativeParse(&nativeState, 0);
+    if (!factory->deserialise(algorithm, nativeParse)) {
+        return fail("native audio fixture could not load its format tag");
+    }
 
     // The host persists ordinary parameter values in its preset. Recreate a
     // fresh instance with those values already restored, including Sample
@@ -1236,6 +1334,10 @@ int main() {
     restoredValues[sample] = 1;
     restored->v = restoredValues.data();
     gAlgorithm = restored;
+    _NT_jsonParse restoredParse(&nativeState, 0);
+    if (!factory->deserialise(restored, restoredParse)) {
+        return fail("native restored fixture could not load its format tag");
+    }
     const uint32_t opensBeforePresetRestore = gStreamOpenCalls;
     factory->parameterChanged(restored, source);
     factory->parameterChanged(restored, folder);
@@ -1256,7 +1358,8 @@ int main() {
         restoredEnergy == 0.0 || restoredValues[source] != 1 ||
         gFolderInfoCalls != folderCallsBeforeRestoredStep ||
         gFileInfoCalls != fileCallsBeforeRestoredStep ||
-        gParameterDefinitionUpdates != definitionUpdatesBeforeRestoredStep) {
+        gParameterDefinitionUpdates != definitionUpdatesBeforeRestoredStep + 1 ||
+        restored->parameters[stretch].def != 0) {
         return fail("preset restore did not load its sample exactly once");
     }
     gAlgorithm = algorithm;
@@ -2350,6 +2453,9 @@ int main() {
     }
     if (!testPresetFormatRoundTripsAndRejectsMalformedData()) {
         return fail("preset format roundtrip or transactional validation failed");
+    }
+    if (!testDefaultOldFormatAndSaveBeforeFirstStep()) {
+        return fail("default-old format, fresh center, or pre-operation save/reload failed");
     }
     if (!testMigrationUsesBaseValuesAndCommonOffset()) {
         return fail("preset initialization changed a mapped base or common offset");

@@ -227,7 +227,7 @@ struct Algorithm : public _NT_algorithm {
     uint32_t pendingUiValueMask;
     int16_t appliedControls[ARRAY_SIZE(kPerformanceParameters)];
     bool processingControlsApplied;
-    int presetFormatVersion = capicola_nt::kPresetFormatVersion;
+    int presetFormatVersion = 1;
     bool processorFaulted;
     float lastOutputLeft;
     float lastOutputRight;
@@ -290,6 +290,10 @@ _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& memory,
     Algorithm* algorithm = new (alignPointer(memory.sram, alignof(Algorithm)))
         Algorithm();
     std::memcpy(algorithm->params, kParameterTemplate, sizeof(kParameterTemplate));
+    // Untagged instances start in the old number range. Its Stretch midpoint
+    // maps to the intended new center; first-step initialization restores the
+    // public default to zero before the plugin operates.
+    algorithm->params[kParamStretch].def = 50;
     algorithm->parameters = algorithm->params;
     algorithm->parameterPages = &kParameterPages;
 
@@ -385,19 +389,24 @@ bool presetBaseValues(Algorithm* algorithm, int& pitch, int& stretch) {
 }
 
 bool updatePresetFormat(Algorithm* algorithm) {
-    if (algorithm->presetFormatVersion == capicola_nt::kPresetFormatVersion) return true;
-    int pitch = 0, stretch = 0;
-    if (!presetBaseValues(algorithm, pitch, stretch)) return false;
-    // The host finishes parameter loading before operation. The first valid
-    // step is the legal audio-setter boundary, before any DSP uses old values.
-    // Read both BASE values first, then mark complete before setter callbacks.
-    algorithm->presetFormatVersion = capicola_nt::kPresetFormatVersion;
-    const uint32_t index = static_cast<uint32_t>(NT_algorithmIndex(algorithm));
+    if (algorithm->presetFormatVersion == capicola_nt::kPresetFormatVersion &&
+        algorithm->params[kParamStretch].def == 0) return true;
+    const int32_t index = NT_algorithmIndex(algorithm);
+    if (index < 0) return false;
     const uint32_t offset = NT_parameterOffset();
-    NT_setParameterFromAudio(index, offset + kParamPitch,
-        static_cast<int16_t>(capicola_nt::pitchValueFromLegacy(pitch)));
-    NT_setParameterFromAudio(index, offset + kParamStretch,
-        static_cast<int16_t>(capicola_nt::stretchValueFromLegacy(stretch)));
+    if (algorithm->presetFormatVersion != capicola_nt::kPresetFormatVersion) {
+        int pitch = 0, stretch = 0;
+        if (!presetBaseValues(algorithm, pitch, stretch)) return false;
+        // Loading finishes before operation. Snapshot both saved BASE values,
+        // then mark complete before setter callbacks, before any DSP runs.
+        algorithm->presetFormatVersion = capicola_nt::kPresetFormatVersion;
+        NT_setParameterFromAudio(static_cast<uint32_t>(index), offset + kParamPitch,
+            static_cast<int16_t>(capicola_nt::pitchValueFromLegacy(pitch)));
+        NT_setParameterFromAudio(static_cast<uint32_t>(index), offset + kParamStretch,
+            static_cast<int16_t>(capicola_nt::stretchValueFromLegacy(stretch)));
+    }
+    algorithm->params[kParamStretch].def = 0;
+    NT_updateParameterDefinition(static_cast<uint32_t>(index), offset + kParamStretch);
     algorithm->processingControlsApplied = false;
     return true;
 }

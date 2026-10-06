@@ -114,9 +114,11 @@ Quality retains epsilon 0.1–0.001 even though upstream's new panel uses
 0.03–0.001. The other 24 definitions and every pre-v0.6.0 parameter/page index
 remain unchanged. The v0.6.0 appended slots 26 and 27 are removed.
 
-The plug-in writes `capicolaFormatVersion: 2` into its custom preset data.
-Missing custom data or a missing marker means original format 1. The one-time
-affine conversion uses saved base values, obtained from
+The plug-in starts in original format 1. Missing custom data or a missing marker
+means format 1; skipping `deserialise()` for an old preset retains the startup
+format. A loaded `capicolaFormatVersion: 2` tag selects native bipolar
+values. Every save includes the current version: 1 before conversion, 2 after.
+The one-time affine conversion uses saved base values, obtained from
 `_NT_slot::parameterPresetValue()` with `NT_parameterOffset()`:
 
 - Pitch: `round(clamp(oldRaw, -120, 120) * 10000 / 120)`;
@@ -137,22 +139,22 @@ processing stays inactive and initialization waits for a valid slot. Subsequent
 blocks and edits use ordinary native parameters. Presets store only the version
 marker; there are no temporary target fields, acknowledgments or migration mode.
 
+Fresh construction uses Pitch 0 and Stretch 50 in the old number range. The
+first valid step converts these to the intended native center values, 0 and 0,
+and restores Stretch's public default to 0. Tagged native loads also restore
+that public default without changing their saved values. Later default resets
+and source changes retain format 2. A save before the first step retains version
+1 and the old numbers, so it reloads correctly too.
+
 The inactive-load lifecycle is a platform constraint supplied by the owner for
 this update. The pinned SDK explicitly permits the audio setter in `step()` and
 `parameterChanged()`, while the latter does not signal completed restoration.
 The SDK does not specify parameter availability or generic/custom ordering inside
 `deserialise()`, so first-step initialization avoids early reads and a later
-restore overwriting the conversion. The local nt_enosc implementation also
-records removal of UI-setter migration inside deserialization as unsafe; it does
-not establish the exact cause.
-
-Recognition of an original preset assumes the loader invokes `deserialise()`
-with absent/unversioned custom state. This convention is handled by the wrapper
-and native tests, but the public SDK does not explicitly state absent-data
-invocation. The owner's lifecycle constraint and SDK callback permissions are
-separate evidence. No actual firmware preset load or listening test was performed.
-The previously simulated operation-during-loading and arbitrarily delayed audio
-setter queue are not established firmware behavior and are not release blockers.
+restore overwriting the conversion. The owner's lifecycle constraint and SDK
+callback permissions are separate evidence. Original-preset detection requires
+no absent-data callback. No actual firmware preset load or listening test was
+performed.
 
 The transient adapter follows upstream v1.0's event semantics. An accepted
 natural slice or valid manual Slice fires one block-quantized input pulse;
@@ -207,10 +209,12 @@ The upstream suite runs against both the untouched vendor headers and the NT
 overlay, including reverse grid movement, backward-head fade completion,
 back-edge re-anchoring, direction-change bounds, detector holdoff and small-ring
 fuzz. Factory tests check the 26 metadata/page positions, one-time conversion of
-old values, both custom-state/parameter restore orders, new mapped-rate behavior
-in both sources, BASE versus mapped values, common parameter offsets, exactly-once
-initialization, versioned save/reload, malformed custom data, native edits after
-initialization, source transitions and pulse boundaries. These are host tests;
+old values with a skipped or empty custom-state callback, both custom-state/
+parameter restore orders, fresh center defaults, new mapped-rate behavior in
+both sources, BASE versus mapped values, common parameter offsets, exactly-once
+initialization, versioned save/reload before and after the first step, malformed
+custom data, native edits after initialization, source transitions and pulse
+boundaries. These are host tests;
 physical firmware preset loading and listening remain unverified.
 
 To prepare both public release assets:
