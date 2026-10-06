@@ -40,11 +40,14 @@ inline float bipolarStretchRate(int value) {
 // Only tracks an in-flight host update. Completed presets store a version
 // marker alone, and every processing state uses the new bipolar behavior.
 struct PresetFormat {
-    bool needsMigration = false;
+    uint8_t unconverted = 0;
     uint8_t pending = 0;
     uint8_t queued = 0;
+    uint8_t observed = 0;
+    bool started = false;
     int16_t target[2] = {};
     int16_t base[2] = {};
+    int16_t submitted[2] = {};
 };
 
 } // namespace capicola_nt

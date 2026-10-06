@@ -726,6 +726,116 @@ bool testBipolarMappedValuesApplyWithoutCallbacks() {
     return true;
 }
 
+bool testNewUiEditBeforeAudioSurvivesMigrationAndSaveReload() {
+    for (const char* control : {"Pitch", "Stretch"}) {
+      for (bool deferUi : {false, true}) {
+        HostPlugin edited(false), restored(false);
+        edited.set("Pitch", 35);
+        edited.set("Stretch", 70);
+        HostJson unversioned;
+        if (!edited.restore(unversioned, true)) return false;
+        if (std::strcmp(control, "Pitch") == 0) {
+            _NT_uiData bank{};
+            bank.controls = kNT_potButtonL;
+            edited.ui(bank);
+        }
+        gDeferParameterUiCommit = deferUi;
+        _NT_uiData edit{};
+        edit.controls = kNT_potL;
+        edit.pots[0] = 0.75f;
+        edited.ui(edit); // Explicit NEW +50%, raw5000.
+        HostJson beforeAudio = edited.save();
+        restored.values = edited.values;
+        restored.baseValues = edited.baseValues;
+        if (!restored.restore(beforeAudio, true)) return false;
+        restored.step();
+        const int changed = edited.parameter(control);
+        const int other = changed == 9 ? 10 : 9;
+        const int otherTarget = other == 9 ? 2917 : 4000;
+        if (restored.baseValues[changed] != 5000 ||
+            restored.baseValues[other] != otherTarget ||
+            restored.save().members.size() != 1) return false;
+        edited.step();
+        gDeferParameterUiCommit = false;
+        if (deferUi) {
+            edited.activate();
+            commitHostParameter(edited.algorithm,
+                static_cast<uint32_t>(gPendingParameter), gPendingParameterValue);
+            gPendingParameter = -1;
+            edited.step();
+        }
+        if (edited.baseValues[changed] != 5000 ||
+            edited.baseValues[other] != otherTarget ||
+            edited.save().members.size() != 1) return false;
+      }
+    }
+    return true;
+}
+
+bool testDeferredMigrationRetainsNewerEdits() {
+    for (bool useCustomUi : {false, true}) {
+        HostPlugin edited(false), restored(false);
+        edited.set("Pitch", 35);
+        edited.set("Stretch", 70);
+        HostJson unversioned;
+        if (!edited.restore(unversioned, true)) return false;
+        gDeferAudioCommit = true;
+        edited.step();
+        if (gAudioWrites.size() != 2) return false;
+        if (useCustomUi) {
+            _NT_uiData bank{};
+            bank.controls = kNT_potButtonL;
+            bank.pots[0] = 1.0f;
+            edited.ui(bank);
+            _NT_uiData edit{};
+            edit.controls = kNT_potL;
+            edit.pots[0] = 0.25f;
+            edited.ui(edit); // Cross the saved target to NEW -50%, raw-5000.
+        } else {
+            edited.set("Pitch", -5000);
+        }
+        edited.map("Pitch", 200); // CV changes must not replace the new base.
+        edited.step();
+        if (gAudioWrites.size() != 2) return false; // One outstanding write each.
+        HostJson whileOldWritePending = edited.save();
+        restored.values = edited.values;
+        restored.baseValues = edited.baseValues;
+        if (!restored.restore(whileOldWritePending, true)) return false;
+        // Commit only the original requests, including the now-stale Pitch.
+        const std::vector<AudioWrite> oldWrites = gAudioWrites;
+        gAudioWrites.clear();
+        for (const AudioWrite& write : oldWrites) {
+            edited.activate();
+            commitHostParameter(write.algorithm, write.parameter, write.value);
+        }
+        HostJson afterOldWrite = edited.save();
+        edited.step(); // Issue one correcting request for the newer base.
+        if (gAudioWrites.size() != 1 || gAudioWrites[0].parameter != 9 ||
+            gAudioWrites[0].value != -5000) return false;
+        const AudioWrite correction = gAudioWrites[0];
+        gAudioWrites.clear();
+        commitHostParameter(correction.algorithm, correction.parameter, correction.value);
+        edited.step();
+        gDeferAudioCommit = false;
+        if (edited.baseValues[9] != -5000 || edited.values[9] != -4800 ||
+            edited.baseValues[10] != 4000 || edited.save().members.size() != 1)
+            return false;
+        restored.step();
+        if (restored.baseValues[9] != -5000 || restored.values[9] != -4800 ||
+            restored.baseValues[10] != 4000 || restored.save().members.size() != 1)
+            return false;
+        HostPlugin savedAfterStaleAck(false);
+        savedAfterStaleAck.set("Pitch", 2917);
+        savedAfterStaleAck.set("Stretch", 4000);
+        if (!savedAfterStaleAck.restore(afterOldWrite, true)) return false;
+        savedAfterStaleAck.step();
+        if (savedAfterStaleAck.baseValues[9] != -5000 ||
+            savedAfterStaleAck.baseValues[10] != 4000 ||
+            savedAfterStaleAck.save().members.size() != 1) return false;
+    }
+    return true;
+}
+
 bool testTransientBusPulseTimingAndUnavailableSource() {
     HostPlugin plugin;
     plugin.set("Threshold", 100);
@@ -2339,6 +2449,12 @@ int main() {
     }
     if (!testDeferredMigrationUsesBaseValuesAndCommonOffset()) {
         return fail("deferred preset migration changed a mapped base or common offset");
+    }
+    if (!testNewUiEditBeforeAudioSurvivesMigrationAndSaveReload()) {
+        return fail("new UI edit before audio was converted again or lost on save/reload");
+    }
+    if (!testDeferredMigrationRetainsNewerEdits()) {
+        return fail("deferred migration overwrote a newer edit or its saved intent");
     }
     if (!testBipolarMappedValuesApplyWithoutCallbacks()) {
         return fail("bipolar mapped controls failed in Live or Sample");

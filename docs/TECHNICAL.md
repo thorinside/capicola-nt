@@ -130,18 +130,38 @@ left in place and now operate on the new parameter definitions.
 Deserialization only records the format. Conversion is deferred to `step()`
 so custom-state restoration can precede or follow parameter restoration.
 The new ranges contain every old raw value, avoiding premature host clipping.
-Host setters are issued once and may commit immediately or on a later block.
+One host setter is issued per outstanding request; the tested host can commit
+immediately or on a later block.
 During a pending write the same new rate calculation uses the converted target
 plus the current raw mapping offset. A save during that brief transition also
 writes `migrationPitchTarget` and/or `migrationStretchTarget`; reload completes
-those writes without converting twice. After commit, only the format marker
-remains. No public mode or extra parameter is added.
+those writes without converting twice. Explicit format 1 can also carry these
+native targets when an edit happens before the other old parameter is converted.
+That edited parameter skips the old range conversion. Desired targets, observed
+base values and outstanding submitted values are tracked separately. An old
+write acknowledgment retains a newer target and schedules a correcting write;
+mapped effective-only changes do not replace the target. After conversion and
+all pending writes complete, only the format marker remains. No public mode or
+extra parameter is added.
 
 The pinned SDK does not specify whether an old preset without custom data
 always invokes `deserialise()`, or formally guarantee that all parameter
 restoration completes before the first audio step. The migration tests exercise
 both restore orders and absent custom data under that hook contract. Actual
 firmware 1.16.0 preset loading has not been verified on hardware.
+
+The generic parameter callback supplies no origin or request identifier. Any
+BASE observation equal to an outstanding submitted value can be mistaken for
+that write's acknowledgment, including an explicit custom UI edit. Review
+reproduced queued Pitch 10000, UI edit 10000, UI edit -5000, then the old queued
+10000 arriving and overwriting the newer edit without a correction. Generic
+restoration before the first migration step is also indistinguishable from an
+ordinary edit. The tested deferred-write model handles the two corrected
+different-value races, but cannot establish reliable acknowledgment for this
+matching-value sequence. Automatic migration is not publication-ready without
+a verified firmware completion/ordering contract, absent-data invocation, and
+restoration boundary. Value polling and a guessed block delay cannot supply
+those guarantees.
 
 The transient adapter follows upstream v1.0's event semantics. An accepted
 natural slice or valid manual Slice fires one block-quantized input pulse;
@@ -198,7 +218,8 @@ back-edge re-anchoring, direction-change bounds, detector holdoff and small-ring
 fuzz. Factory tests check the 26 metadata/page positions, one-time conversion of
 old values, both custom-state/parameter restore orders, new mapped-rate behavior
 in both sources, immediate/deferred host writes, versioned save/reload, malformed
-custom data, source transitions and pulse boundaries. These are host tests;
+custom data, edits and saves before first audio, newer edits during queued
+migration writes, source transitions and pulse boundaries. These are host tests;
 physical firmware preset loading and listening remain unverified.
 
 To prepare both public release assets:

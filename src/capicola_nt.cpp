@@ -384,39 +384,70 @@ bool presetBaseValues(Algorithm* algorithm, int& pitch, int& stretch) {
     return true;
 }
 
+void observePresetBases(Algorithm* algorithm, int pitch, int stretch) {
+    auto& format = algorithm->presetFormat;
+    const int bases[] = {pitch, stretch};
+    for (int i = 0; i < 2; ++i) {
+        const uint8_t bit = static_cast<uint8_t>(1U << i);
+        if ((format.pending & bit) == 0) continue;
+        if ((format.observed & bit) == 0) {
+            format.observed |= bit;
+        } else if ((format.queued & bit) != 0 && bases[i] == format.submitted[i]) {
+            // Conditional host model: a matching BASE acknowledges this
+            // write. The SDK provides no origin/token; a matching edit is
+            // ambiguous, so release requires a verified setter contract.
+            // Keep the latest desired target after an older write arrives.
+            format.queued &= ~bit;
+        } else if (bases[i] != format.base[i]) {
+            // A changed BASE is a newer ordinary edit; mapped effective-only
+            // changes must never replace the saved target.
+            format.target[i] = static_cast<int16_t>(bases[i]);
+        }
+        format.base[i] = static_cast<int16_t>(bases[i]);
+        // Keep a native pre-step override while another parameter is still
+        // old-format, so a save cannot label that mixed state incorrectly.
+        if (format.unconverted == 0 && (format.queued & bit) == 0 &&
+            bases[i] == format.target[i]) {
+            format.pending &= ~bit;
+        }
+    }
+}
+
 void updatePresetFormat(Algorithm* algorithm) {
     auto& format = algorithm->presetFormat;
-    if (!format.needsMigration && format.pending == 0) return;
+    if (format.unconverted == 0 && format.pending == 0) {
+        format = {};
+        return;
+    }
     int pitch = 0, stretch = 0;
     if (!presetBaseValues(algorithm, pitch, stretch)) return;
-    if (format.needsMigration) {
+    if ((format.unconverted & 1) != 0) {
         format.target[0] = static_cast<int16_t>(capicola_nt::pitchValueFromLegacy(pitch));
-        format.target[1] = static_cast<int16_t>(capicola_nt::stretchValueFromLegacy(stretch));
-        format.pending = 3;
-        format.queued = 0;
-        format.needsMigration = false;
-        algorithm->processingControlsApplied = false;
+        format.pending |= 1;
     }
-    const int bases[] = {pitch, stretch};
+    if ((format.unconverted & 2) != 0) {
+        format.target[1] = static_cast<int16_t>(capicola_nt::stretchValueFromLegacy(stretch));
+        format.pending |= 2;
+    }
+    format.unconverted = 0;
+    format.started = true;
+    observePresetBases(algorithm, pitch, stretch);
     const int parameters[] = {kParamPitch, kParamStretch};
     for (int i = 0; i < 2; ++i) {
         const uint8_t bit = static_cast<uint8_t>(1U << i);
         if ((format.pending & bit) == 0) continue;
-        format.base[i] = static_cast<int16_t>(bases[i]);
-        if (bases[i] == format.target[i]) {
-            format.pending &= ~bit;
-        } else if ((format.queued & bit) == 0) {
+        if ((format.queued & bit) == 0) {
             // Set before the host call, which may immediately notify us.
             format.queued |= bit;
+            format.submitted[i] = format.target[i];
             NT_setParameterFromAudio(NT_algorithmIndex(algorithm),
-                parameters[i] + NT_parameterOffset(), format.target[i]);
+                parameters[i] + NT_parameterOffset(), format.submitted[i]);
         }
     }
     // A host may commit immediately or publish these writes on a later block.
     // Never migrate a mapped effective value instead of the saved base.
     if (presetBaseValues(algorithm, pitch, stretch)) {
-        if (pitch == format.target[0]) format.pending &= ~uint8_t{1};
-        if (stretch == format.target[1]) format.pending &= ~uint8_t{2};
+        observePresetBases(algorithm, pitch, stretch);
     }
     if (format.pending == 0) format = {};
 }
@@ -426,6 +457,7 @@ int processingControlValue(const Algorithm* algorithm, int parameter, int value)
     const int index = parameter == kParamPitch ? 0 : 1;
     if (parameter != kParamPitch && parameter != kParamStretch) return value;
     if ((format.pending & (1U << index)) == 0) return value;
+    if ((format.observed & (1U << index)) == 0) return format.target[index];
     return capicola_nt::clampControl(
         format.target[index] + value - format.base[index], -10000, 10000);
 }
@@ -926,6 +958,20 @@ void parameterChanged(_NT_algorithm* base, int parameter) {
             break;
         case kParamPitch:
         case kParamStretch:
+        {
+            const auto& format = algorithm->presetFormat;
+            // Before the first migration step, these callbacks can belong to
+            // generic preset restoration. Explicit custom-UI edits carry their
+            // own target in setFromUi(); don't infer native edits here yet.
+            if (format.started && format.pending != 0) {
+                int pitch = 0, stretch = 0;
+                if (presetBaseValues(algorithm, pitch, stretch)) {
+                    observePresetBases(algorithm, pitch, stretch);
+                }
+            }
+            algorithm->processingControlsApplied = false;
+            break;
+        }
         case kParamThreshold:
         case kParamGrainSize:
         case kParamQuality:
@@ -1682,9 +1728,16 @@ bool pressed(const _NT_uiData& data, uint16_t control) {
 void setFromUi(Algorithm* algorithm, int parameter, int value) {
     if (parameter == kParamPitch || parameter == kParamStretch) {
         const uint8_t bit = parameter == kParamPitch ? 1 : 2;
-        algorithm->presetFormat.pending &= ~bit;
-        algorithm->presetFormat.queued &= ~bit;
         value = capicola_nt::clampControl(value, -10000, 10000);
+        auto& format = algorithm->presetFormat;
+        if (format.unconverted != 0 || format.pending != 0) {
+            // This event explicitly supplies a NEW value. Supersede only its
+            // old conversion, and retain any older queued write until its ACK
+            // so it cannot discard this target or a save of the newer intent.
+            format.unconverted &= ~bit;
+            format.target[parameter == kParamPitch ? 0 : 1] = static_cast<int16_t>(value);
+            format.pending |= bit;
+        }
         algorithm->processingControlsApplied = false;
     }
     const _NT_parameter& definition = algorithm->params[parameter];
@@ -1792,10 +1845,9 @@ void serialise(_NT_algorithm* base, _NT_jsonStream& stream) {
     Algorithm* algorithm = static_cast<Algorithm*>(base);
     const auto& format = algorithm->presetFormat;
     stream.addMemberName("capicolaFormatVersion");
-    stream.addNumber(format.needsMigration ? 1 : capicola_nt::kPresetFormatVersion);
-    if (format.needsMigration) return;
-    // If saved during a deferred host commit, persist only its remaining
-    // targets. Reload finishes the writes without a second range conversion.
+    stream.addNumber(format.unconverted != 0 ? 1 : capicola_nt::kPresetFormatVersion);
+    // Persist the latest targets while conversion or a host write is pending,
+    // including explicit native edits made before the first audio step.
     if ((format.pending & 1) != 0) {
         stream.addMemberName("migrationPitchTarget");
         stream.addNumber(format.target[0]);
@@ -1809,7 +1861,6 @@ void serialise(_NT_algorithm* base, _NT_jsonStream& stream) {
 bool deserialise(_NT_algorithm* base, _NT_jsonParse& parse) {
     Algorithm* algorithm = static_cast<Algorithm*>(base);
     capicola_nt::PresetFormat restored;
-    restored.needsMigration = true; // Unversioned presets are the original format.
     int members = 0;
     int version = 1;
     uint32_t seen = 0;
@@ -1839,8 +1890,11 @@ bool deserialise(_NT_algorithm* base, _NT_jsonParse& parse) {
             seen |= bit;
         }
     }
-    if (version == 1 && (seen & 6) != 0) return false;
-    restored.needsMigration = version == 1;
+    if ((seen & 6) != 0 && (seen & 1) == 0) return false;
+    // Explicit format1 may carry a native pre-step edit. Such targets skip
+    // conversion; only the remaining old-format parameters are mapped once.
+    restored.unconverted = version == 1
+        ? static_cast<uint8_t>(3U & ~restored.pending) : 0;
     // No host setters, parameter reads, or DSP work here: the SDK does not
     // specify whether custom state precedes parameter/mapping restoration.
     algorithm->presetFormat = restored;
