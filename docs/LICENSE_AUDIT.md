@@ -2,7 +2,7 @@
 
 - Audit date: 2026-08-24
 - Audited wrapper tree: the release tree containing this document
-- Audited upstream revision: Capicola `f0fb61cfa7111067b4ec1a642d1b16a0910adb3b`
+- Audited upstream revision: Capicola `120b0b843c18bda373d96eb79d49805545f61556`
 - Audited platform API revision: distingNT API `cd12d876dbe060859828053efab1cbc98c9df251`
 
 ## Conclusion

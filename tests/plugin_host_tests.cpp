@@ -326,6 +326,255 @@ struct HostPlugin {
     }
 };
 
+bool testReleasedParameterAndPagePrefixes() {
+    HostPlugin plugin;
+    struct Definition { const char* name; int min, max, def, unit, scaling; };
+    const Definition released[] = {
+        {"Left input", 1, 64, 1, kNT_unitAudioInput, 0},
+        {"Right input", 0, 64, 2, kNT_unitAudioInput, 0},
+        {"Left output", 1, 64, 13, kNT_unitAudioOutput, 0},
+        {"Left output mode", 0, 1, 0, kNT_unitOutputMode, 0},
+        {"Right output", 1, 64, 14, kNT_unitAudioOutput, 0},
+        {"Right output mode", 0, 1, 0, kNT_unitOutputMode, 0},
+        {"Source", 0, 1, 0, kNT_unitEnum, 0},
+        {"Folder", 0, 1, 0, kNT_unitHasStrings, 0},
+        {"Sample", 0, 1, 0, kNT_unitConfirm, 0},
+        {"Pitch", -120, 120, 0, kNT_unitSemitones, kNT_scaling10},
+        {"Stretch", 0, 100, 0, kNT_unitPercent, 0},
+        {"Threshold", 0, 100, 22, kNT_unitPercent, 0},
+        {"Grain Size", 32, 4096, 128, kNT_unitNone, 0},
+        {"Quality", 0, 100, 100, kNT_unitPercent, 0},
+        {"Feedback", 0, 150, 0, kNT_unitPercent, 0},
+        {"Envelope Smoothing", 0, 10000, 4259, kNT_unitPercent, kNT_scaling100},
+        {"Fade", 0, 10000, 2153, kNT_unitPercent, kNT_scaling100},
+        {"Drive", 0, 10000, 1429, kNT_unitPercent, kNT_scaling100},
+        {"Drive Character", 0, 10000, 10000, kNT_unitPercent, kNT_scaling100},
+        {"Mix", 0, 100, 100, kNT_unitPercent, 0},
+        {"Feedback Tone", 0, 10000, 3769, kNT_unitPercent, kNT_scaling100},
+        {"Input Transient output", 0, 64, 0, kNT_unitCvOutput, 0},
+        {"Output Transient output", 0, 64, 0, kNT_unitCvOutput, 0},
+        {"Input Envelope output", 0, 64, 0, kNT_unitCvOutput, 0},
+        {"Output Envelope output", 0, 64, 0, kNT_unitCvOutput, 0},
+        {"Input Gain", -60, 0, 0, kNT_unitDb, kNT_scalingNone},
+    };
+    if (plugin.requirements.numParameters != 28) return false;
+    for (int i = 0; i < 26; ++i) {
+        const auto& actual = plugin.algorithm->parameters[i];
+        const auto& expected = released[i];
+        if (std::strcmp(actual.name, expected.name) != 0 ||
+            actual.min != expected.min || actual.max != expected.max ||
+            actual.def != expected.def || actual.unit != expected.unit ||
+            actual.scaling != expected.scaling) return false;
+        if (i == 6) {
+            if (std::strcmp(actual.enumStrings[0], "Live") != 0 ||
+                std::strcmp(actual.enumStrings[1], "Sample") != 0) return false;
+        } else if (actual.enumStrings != nullptr) return false;
+    }
+    for (int i = 26; i < 28; ++i) {
+        const auto& p = plugin.algorithm->parameters[i];
+        if (std::strcmp(p.name, i == 26 ? "Bipolar Pitch" : "Bipolar Stretch") ||
+            p.min != -100 || p.max != 100 || p.def != 0 ||
+            p.unit != kNT_unitPercent || p.scaling != 0 ||
+            p.enumStrings != nullptr || plugin.values[i] != 0) return false;
+    }
+    const uint8_t performance[] = {25,9,10,11,12,13,14,15,16,17,18,19,20,26,27};
+    const uint8_t source[] = {6,7,8};
+    const uint8_t routing[] = {0,1,2,3,4,5,21,22,23,24};
+    const uint8_t* indices[] = {performance, source, routing};
+    const int counts[] = {15,3,10};
+    const char* names[] = {"Performance", "Source", "Routing"};
+    const auto* pages = plugin.algorithm->parameterPages;
+    if (pages->numPages != 3) return false;
+    for (int i = 0; i < 3; ++i) {
+        const auto& page = pages->pages[i];
+        if (std::strcmp(page.name, names[i]) || page.group != 0 ||
+            page.numParams != counts[i] ||
+            std::memcmp(page.params, indices[i], counts[i]) != 0) return false;
+    }
+    return true;
+}
+
+bool testOldPresetVectorKeepsCenteredDefaults() {
+    for (int source : {0, 1}) {
+        HostPlugin restored, configured;
+        // Literal v0.5.3 vector, copied into a newly defaulted factory instance.
+        const int16_t preset[] = {
+            1,0,13,1,14,1,static_cast<int16_t>(source),0,1,35,70,100,
+            128,92,45,4259,2153,1429,5000,100,3769,0,0,0,0,-6,
+        };
+        std::copy(preset, preset + 26, restored.values.begin());
+        for (int i = 0; i < 26; ++i) {
+            restored.activate();
+            restored.factory->parameterChanged(restored.algorithm, i);
+            if (i != 6) {
+                configured.set(configured.algorithm->parameters[i].name, preset[i]);
+            }
+        }
+        configured.set("Source", source);
+        if (restored.values[26] != 0 || restored.values[27] != 0) return false;
+        double energy = 0.0;
+        for (int block = 0; block < 500; ++block) {
+            for (int i = 0; i < kFrames; ++i) {
+                restored.buses[i] = configured.buses[i] = 3.0f * std::sin(
+                    2.0f * kPi * 237.0f * (block * kFrames + i) / 48000.0f);
+            }
+            restored.step();
+            configured.step();
+            for (int i = 0; i < kFrames; ++i) {
+                if (restored.output(i) != configured.output(i)) return false;
+                energy += std::fabs(restored.output(i));
+            }
+        }
+        if (energy < 100.0) return false;
+    }
+    return true;
+}
+
+bool testBipolarMappedValuesApplyWithoutCallbacks() {
+    for (int source : {0, 1}) {
+        for (const char* control : {"Bipolar Pitch", "Bipolar Stretch"}) {
+            HostPlugin notified, mapped, centered;
+            for (HostPlugin* plugin : {&notified, &mapped, &centered}) {
+                plugin->set("Right input", 0);
+                plugin->set("Threshold", 100);
+                plugin->set("Drive Character", 5000);
+                plugin->set("Source", source);
+            }
+            double difference = 0.0;
+            const int positions[] = {-100, -50, -25, 50, 100};
+            for (int block = 0; block < 1600; ++block) {
+                if (block >= 400 && block % 200 == 0) {
+                    const int position = positions[((block - 400) / 200) % 5];
+                    notified.set(control, position);
+                    mapped.values[mapped.parameter(control)] = position;
+                }
+                for (int i = 0; i < kFrames; ++i) {
+                    const float input = 3.0f * std::sin(
+                        2.0f * kPi * 237.0f * (block * kFrames + i) / 48000.0f);
+                    for (HostPlugin* plugin : {&notified, &mapped, &centered}) {
+                        plugin->buses[i] = input;
+                    }
+                }
+                notified.step(); mapped.step(); centered.step();
+                for (int i = 0; i < kFrames; ++i) {
+                    if (!std::isfinite(mapped.output(i)) ||
+                        mapped.output(i) != notified.output(i) ||
+                        mapped.output(i) != mapped.output(i, 1)) return false;
+                    difference += std::fabs(mapped.output(i) - centered.output(i));
+                }
+            }
+            if (difference < 100.0) return false;
+        }
+    }
+    return true;
+}
+
+bool testTransientBusPulseTimingAndUnavailableSource() {
+    HostPlugin plugin;
+    plugin.set("Threshold", 100);
+    plugin.set("Input Transient output", 15);
+    plugin.step();
+    _NT_uiData slice{};
+    slice.controls = kNT_encoderButtonR;
+    plugin.ui(slice);
+    for (int block = 0; block < 9; ++block) {
+        if (block == 2) { plugin.ui({}); plugin.ui(slice); }
+        plugin.step();
+        for (int i = 0; i < kFrames; ++i) {
+            if (plugin.buses[14 * kFrames + i] !=
+                (block * kFrames + i < 480 ? 5.0f : 0.0f)) {
+                std::printf("pulse mismatch block %d frame %d: %f\n", block, i,
+                            plugin.buses[14 * kFrames + i]);
+                return false;
+            }
+        }
+    }
+    // Missing Sample resets and silences CV, including a pending manual slice.
+    plugin.ui({}); plugin.ui(slice);
+    gStreamInitialEmptyRenders = 100;
+    plugin.set("Source", 1);
+    for (int block = 0; block < 10; ++block) {
+        plugin.step();
+        for (int i = 0; i < kFrames; ++i) {
+            if (plugin.buses[14 * kFrames + i] != 0.0f) return false;
+        }
+    }
+    return true;
+}
+
+bool testTransientPulseSpansWarmHandoffAndShortReads() {
+    HostPlugin plugin;
+    plugin.set("Threshold", 100);
+    plugin.set("Input Transient output", 15);
+    plugin.set("Source", 1);
+    for (int block = 0; block < 100; ++block) plugin.step();
+    plugin.set("Sample", 1);
+    for (int block = 0; block < 37; ++block) plugin.step();
+    // The next 64-frame block splits into two 32-frame handoff segments.
+    _NT_uiData slice{};
+    slice.controls = kNT_encoderButtonR;
+    plugin.ui(slice);
+    for (int block = 0; block < 9; ++block) {
+        plugin.step();
+        for (int i = 0; i < kFrames; ++i) {
+            if (plugin.buses[14 * kFrames + i] !=
+                (block * kFrames + i < 480 ? 5.0f : 0.0f)) return false;
+        }
+    }
+
+    HostPlugin shortRead;
+    gSampleFrameCount = 16;
+    shortRead.set("Threshold", 100);
+    shortRead.set("Input Transient output", 15);
+    shortRead.set("Output Transient output", 16);
+    shortRead.set("Source", 1);
+    shortRead.step();
+    shortRead.ui(slice);
+    for (int block = 0; block < 9; ++block) {
+        shortRead.step();
+        // The first block consumed the file and one loop; later blocks can
+        // reopen it once, yielding 16 valid frames and 48 unavailable frames.
+        for (int i = 0; i < kFrames; ++i) {
+            const float expected = block * kFrames + i < 480 && i < 16 ? 5.0f : 0.0f;
+            if (shortRead.buses[14 * kFrames + i] != expected ||
+                shortRead.buses[15 * kFrames + i] != 0.0f) {
+                std::printf("short-read pulse block %d frame %d: in=%f expected=%f out=%f\n",
+                            block, i, shortRead.buses[14 * kFrames + i], expected,
+                            shortRead.buses[15 * kFrames + i]);
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool testBipolarDisplayShowsEffectiveRates() {
+    HostPlugin plugin;
+    const auto draw = [&]() {
+        plugin.activate();
+        gDrawnText.clear();
+        plugin.factory->draw(plugin.algorithm);
+    };
+    plugin.set("Bipolar Stretch", -100);
+    draw();
+    if (!drawnTextContains("-1.0x")) return false;
+    plugin.set("Bipolar Stretch", -50);
+    draw();
+    if (!drawnTextContains("FREEZE")) return false;
+    _NT_uiData bank{};
+    bank.controls = kNT_potButtonL;
+    plugin.ui(bank);
+    plugin.set("Bipolar Pitch", -100);
+    draw();
+    if (!drawnTextContains("-2.00x")) return false;
+    plugin.set("Bipolar Pitch", -50);
+    draw();
+    if (!drawnTextContains("HOLD")) return false;
+    plugin.set("Bipolar Pitch", 0);
+    draw();
+    return drawnTextContains("+0.0 st");
+}
+
 bool testInactiveFolderPreservesLiveAudio() {
     HostPlugin uninterrupted, browsing;
     for (HostPlugin* plugin : {&uninterrupted, &browsing}) {
@@ -660,7 +909,7 @@ int main() {
     }
     const _NT_parameter& inputGainDefinition =
         algorithm->parameters[inputGain];
-    if (inputGain != count - 1 || inputGainDefinition.min != -60 ||
+    if (inputGain != 25 || inputGainDefinition.min != -60 ||
         inputGainDefinition.max != 0 || inputGainDefinition.def != 0 ||
         inputGainDefinition.unit != kNT_unitDb ||
         inputGainDefinition.scaling != kNT_scalingNone) {
@@ -1818,6 +2067,24 @@ int main() {
         return fail("folder selection is not named through the NT interface");
     }
 
+    if (!testReleasedParameterAndPagePrefixes()) {
+        return fail("released parameter metadata/page prefixes changed");
+    }
+    if (!testOldPresetVectorKeepsCenteredDefaults()) {
+        return fail("old preset vector did not preserve centered processing defaults");
+    }
+    if (!testBipolarMappedValuesApplyWithoutCallbacks()) {
+        return fail("bipolar mapped controls failed in Live or Sample");
+    }
+    if (!testTransientBusPulseTimingAndUnavailableSource()) {
+        return fail("transient bus pulse timing/reset is incorrect");
+    }
+    if (!testTransientPulseSpansWarmHandoffAndShortReads()) {
+        return fail("transient pulse failed across warm handoff/short reads");
+    }
+    if (!testBipolarDisplayShowsEffectiveRates()) {
+        return fail("bipolar display hid effective stop/reverse rates");
+    }
     if (!testInactiveFolderPreservesLiveAudio()) {
         return fail("browsing an inactive sample folder disrupted live audio");
     }

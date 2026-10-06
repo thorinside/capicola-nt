@@ -12,7 +12,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 EXPECTED = {
     "vendor/capicola": (
         "https://github.com/heavylight-industries/capicola.git",
-        "f0fb61cfa7111067b4ec1a642d1b16a0910adb3b",
+        "120b0b843c18bda373d96eb79d49805545f61556",
     ),
     "vendor/distingNT_API": (
         "https://github.com/expertsleepersltd/distingNT_API.git",

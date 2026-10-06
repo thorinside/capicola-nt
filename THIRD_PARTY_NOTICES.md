@@ -4,7 +4,7 @@
 
 This project is a wrapper around [Capicola](https://github.com/heavylight-industries/capicola), authored and published by **Heavylight Industries**.
 
-- Pinned revision: `f0fb61cfa7111067b4ec1a642d1b16a0910adb3b`
+- Pinned revision: `120b0b843c18bda373d96eb79d49805545f61556`
 - Repository path: `vendor/capicola`
 - License: GNU Affero General Public License, version 3 (`AGPL-3.0-only`)
 - License text: [`LICENSE`](LICENSE), preserved byte-for-byte from the pinned upstream [`vendor/capicola/LICENSE`](vendor/capicola/LICENSE)

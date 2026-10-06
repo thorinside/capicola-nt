@@ -1,5 +1,35 @@
 # Capicola for disting NT release notes
 
+## v0.6.0
+
+Updates the portable Capicola DSP to upstream **v1.0.0**, commit
+`120b0b843c18bda373d96eb79d49805545f61556`.
+
+- **Reverse processing:** Adds Bipolar Pitch and Bipolar Stretch to the end of
+  the Performance page and parameter array. Both default to 0%, which preserves
+  the legacy rate. -50% stops the pitch head or freezes the stretch grid;
+  -100% reaches full reverse (-2× pitch, -1× stretch), and +100% reaches the
+  forward limit. The SD-file stream remains forward; these controls act on the
+  captured DSP history in both Live and Sample modes.
+- **Upstream fixes:** Includes reverse window seeking, backward crossfades,
+  buffer-edge re-anchoring and crossfaded pitch direction changes.
+- **Transient outputs:** Uses upstream's accepted slice and follower events
+  instead of its removed gate API. Assigned outputs produce non-retriggerable
+  10 ms, 5 V pulses. Natural detectors have a 150 ms holdoff; valid manual Slice
+  also produces an input pulse. Startup, pitch flips and stereo guard requests
+  do not add musical trigger events.
+- **Preset compatibility:** Retains all 26 original parameter definitions,
+  their indices and every existing page entry. Legacy Pitch, Stretch and
+  Quality tapers remain intact; the new controls occupy indices 26 and 27.
+  There is no additional mode or preset format.
+
+Validation covers the upstream host suite both unmodified and with the four NT
+portability overlays, wrapper DSP and exported-host integration tests, literal
+old preset vectors with defaulted appended values, mapped changes in both
+sources, pulse timing, and an inspected Cortex-M7 ARM object. Physical NT preset
+loading and listening were not performed for this release. Firmware 1.16.0,
+API v13 and 48 kHz remain the supported baseline.
+
 ## v0.5.3
 
 This release fixes six wrapper behaviors while retaining the pinned Capicola

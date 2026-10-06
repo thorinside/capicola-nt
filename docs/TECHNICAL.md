@@ -6,8 +6,8 @@ should start with the [installation and user guide](../README.md).
 ## Released implementation
 
 The current published binary is
-[`v0.5.3`](https://github.com/thorinside/capicola-nt/releases/tag/v0.5.3).
-See the [release notes](RELEASE_NOTES.md) for the wrapper fixes in this version.
+[`v0.6.0`](https://github.com/thorinside/capicola-nt/releases/tag/v0.6.0).
+See the [release notes](RELEASE_NOTES.md) for the upstream v1.0 DSP update.
 
 | Item | Value |
 | --- | --- |
@@ -104,6 +104,38 @@ remain ordinary host parameters on the Performance page. Input Gain is appended
 to the underlying parameter array so every released parameter index remains
 preset-stable.
 
+Upstream v1.0 supports signed pitch-head and stretch-grid rates. The appended
+**Bipolar Pitch** and **Bipolar Stretch** parameters occupy indices 26 and 27,
+range from -100 to +100%, and default to 0%. The 26 earlier definitions and all
+earlier page entries remain unchanged; the new controls are appended to
+Performance. Legacy Pitch remains `exp2(semitones/12)`, Stretch remains
+`(1-x)^2.5`, and Quality retains epsilon 0.1–0.001 even though upstream's new
+panel uses 0.03–0.001. There is no extra mode, custom preset format or bank.
+
+For legacy rate `b`, signed limit `L` (2 for Pitch, 1 for Stretch), and raw
+position `p`, the piecewise rate is:
+
+- -100 ≤ p ≤ -50: `L * (p + 50) / 50`;
+- -50 < p < 0: `b * (p + 50) / 50`;
+- p = 0: exactly `b`;
+- 0 < p ≤ 100: `b + (L - b) * p / 100`.
+
+Thus -50% is an exactly selectable stop, center preserves any old preset rate,
+and the endpoints reach full reverse/forward. The same mapping runs for host
+callbacks and effective `v[]` changes in step, across both sources. Rate changes
+do not reset the warm processor. The custom screen preserves its controls but
+shows a negative stretch factor for reverse, **FREEZE** for a stopped grid, and
+signed pitch rates or **HOLD** when Bipolar Pitch is active. The file stream
+itself still advances forward.
+
+The transient adapter follows upstream v1.0's event semantics. An accepted
+natural slice or valid manual Slice fires one block-quantized input pulse;
+startup seeding, pitch flips and the stereo guard do not count. The output
+detector fires sample-timed follower pulses. Both are non-retriggerable 480-frame
+(10 ms) pulses and continue across blocks and warm replacement segments. Two
+additional host-sized DRAM arrays hold CV frames. Missing source frames write
+zero and age timers; cold engine reset clears them. See [ANALYSIS_CV.md](ANALYSIS_CV.md).
+
 Replacing or explicitly reopening a sample prepares a second fixed stream slot.
 The old stream remains audible until `NT_streamRender()` returns the replacement's
 first frames. The already-warm Capicola processor then receives the old stream
@@ -124,7 +156,7 @@ wrapper history:
 
 | Component | Repository | Commit |
 | --- | --- | --- |
-| Capicola | `heavylight-industries/capicola` | `f0fb61cfa7111067b4ec1a642d1b16a0910adb3b` |
+| Capicola | `heavylight-industries/capicola` | `120b0b843c18bda373d96eb79d49805545f61556` |
 | distingNT_API | `expertsleepersltd/distingNT_API` | `cd12d876dbe060859828053efab1cbc98c9df251` |
 
 [`SUBMODULES.lock`](../SUBMODULES.lock) is the concise provenance record. The
@@ -144,6 +176,14 @@ make verify
 host integration tests with warnings as errors, builds the ARM object, and
 verifies that it is an ELF32 little-endian ARM relocatable object exporting
 `pluginEntry`. The result is `build/plugins/capicola.o`.
+
+The upstream suite runs against both the untouched vendor headers and the NT
+overlay, including reverse grid movement, backward-head fade completion,
+back-edge re-anchoring, direction-change bounds, detector holdoff and small-ring
+fuzz. Factory tests check literal metadata/page prefixes, old 26-value vectors
+with defaulted appended fields, mapped rate changes, source transitions and
+pulse boundaries. These are host tests, not physical firmware preset loading or
+listening validation; neither was performed for v0.6.0.
 
 To prepare both public release assets:
 

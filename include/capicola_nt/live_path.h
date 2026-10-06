@@ -13,6 +13,26 @@
 
 namespace capicola_nt {
 
+// Upstream v1.0 exposes musical events instead of detector gate state.
+// A running pulse consumes further events without extending or queuing them.
+class TransientPulse {
+public:
+    void reset() { remaining_ = 0; }
+    void fire() { if (remaining_ == 0) remaining_ = 480; }
+    float tick() {
+        if (remaining_ == 0) return 0.0f;
+        --remaining_;
+        return 5.0f;
+    }
+    void advanceSilent(std::size_t frames) {
+        remaining_ = frames >= remaining_ ? 0 : remaining_ - frames;
+    }
+    bool active() const { return remaining_ != 0; }
+
+private:
+    std::size_t remaining_ = 0;
+};
+
 template <typename Channel>
 class StereoLivePath {
 public:
@@ -61,11 +81,17 @@ public:
         outputEnvelope_ = 0.0f;
         inputTransient_ = false;
         outputTransient_ = false;
+        inputPulse_.reset();
+        outputPulse_.reset();
+        pendingManualSlice_ = false;
     }
 
     void setPitchSemitones(float semitones) {
-        const float ratio = std::exp2(semitones / 12.0f);
-        for (auto& channel : channels_) channel.SetGrainPitch(ratio);
+        setPitchRate(std::exp2(semitones / 12.0f));
+    }
+
+    void setPitchRate(float rate) {
+        for (auto& channel : channels_) channel.SetGrainPitch(rate);
     }
 
     void setStretch(float stretch) {
@@ -118,7 +144,7 @@ public:
         for (auto& channel : channels_) {
             // Preserve the queued LIVE_EFFECT request until audio starts.
             if (channel.GetState() == capicola::State::LIVE_EFFECT) {
-                channel.SubmitRequest(capicola::Request::SLICE);
+                pendingManualSlice_ = true;
             }
         }
     }
@@ -128,11 +154,29 @@ public:
     float inputEnvelope() const { return inputEnvelope_; }
     float outputEnvelope() const { return outputEnvelope_; }
 
+    void advanceSilent(std::size_t frames) {
+        inputPulse_.advanceSilent(frames);
+        outputPulse_.advanceSilent(frames);
+        pendingManualSlice_ = false;
+        inputTransient_ = false;
+        outputTransient_ = false;
+    }
+
     void process(const float* left,
                  const float* right,
                  float* outLeft,
                  float* outRight,
-                 std::size_t frames) {
+                 std::size_t frames,
+                 float* inputTransientCv = nullptr,
+                 float* outputTransientCv = nullptr) {
+        if (frames == 0) return;
+        const bool manualSlice = pendingManualSlice_;
+        pendingManualSlice_ = false;
+        if (manualSlice) {
+            for (auto& channel : channels_) {
+                channel.SubmitRequest(capicola::Request::SLICE);
+            }
+        }
         const float* inputs[2] = {left, right != nullptr ? right : left};
         float* outputs[2] = {outLeft, outRight};
         const bool useFeedback = feedbackAmount_ > 0.0f &&
@@ -169,6 +213,7 @@ public:
         // also catches the other side when their source times drift over 1 s.
         const bool leftFired = channels_[0].FiredThisBlock();
         const bool rightFired = channels_[1].FiredThisBlock();
+        if (manualSlice || leftFired || rightFired) inputPulse_.fire();
         if (leftFired != rightFired) {
             const double leftLag = channels_[0].GridLag();
             const double rightLag = channels_[1].GridLag();
@@ -183,16 +228,21 @@ public:
         // the post-mix mono sum while the input analysis comes from the linked
         // per-channel recorders.
         for (std::size_t i = 0; i < frames; ++i) {
-            outputDetector_.Analyze(outLeft[i] + outRight[i]);
+            if (outputDetector_.Analyze(outLeft[i] + outRight[i])) {
+                outputPulse_.fire();
+            }
+            const float inputVoltage = inputPulse_.tick();
+            const float outputVoltage = outputPulse_.tick();
+            if (inputTransientCv != nullptr) inputTransientCv[i] = inputVoltage;
+            if (outputTransientCv != nullptr) outputTransientCv[i] = outputVoltage;
         }
         const float leftEnvelope = channels_[0].TkeoEnvelope();
         const float rightEnvelope = channels_[1].TkeoEnvelope();
         inputEnvelope_ = normalizeEnvelope(
             leftEnvelope > rightEnvelope ? leftEnvelope : rightEnvelope);
         outputEnvelope_ = normalizeEnvelope(outputDetector_.Envelope());
-        inputTransient_ = channels_[0].DetectorGate() ||
-                          channels_[1].DetectorGate();
-        outputTransient_ = outputDetector_.Gate();
+        inputTransient_ = inputPulse_.active();
+        outputTransient_ = outputPulse_.active();
     }
 
 private:
@@ -216,6 +266,9 @@ private:
     float outputEnvelope_;
     bool inputTransient_;
     bool outputTransient_;
+    TransientPulse inputPulse_;
+    TransientPulse outputPulse_;
+    bool pendingManualSlice_;
 };
 
 } // namespace capicola_nt

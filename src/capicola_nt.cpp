@@ -12,6 +12,7 @@
 #include <distingnt/wav.h>
 
 #include "capicola_nt/live_path.h"
+#include "capicola_nt/bipolar_mapping.h"
 
 namespace {
 
@@ -63,8 +64,12 @@ enum Parameter {
     // Released parameter indices above this line are preset-stable. Append
     // wrapper controls here even when a page presents them earlier.
     kParamInputGain,
+    kParamBipolarPitch,
+    kParamBipolarStretch,
     kNumParameters,
 };
+
+static_assert(kNumParameters <= 32, "pending UI values use a 32-bit mask");
 
 enum SourceMode {
     kSourceLive,
@@ -130,6 +135,10 @@ static const _NT_parameter kParameterTemplate[] = {
     NT_PARAMETER_CV_OUTPUT("Output Envelope output", 0, 0)
     {.name = "Input Gain", .min = -60, .max = 0, .def = 0,
      .unit = kNT_unitDb, .scaling = kNT_scalingNone, .enumStrings = nullptr},
+    {.name = "Bipolar Pitch", .min = -100, .max = 100, .def = 0,
+     .unit = kNT_unitPercent, .scaling = 0, .enumStrings = nullptr},
+    {.name = "Bipolar Stretch", .min = -100, .max = 100, .def = 0,
+     .unit = kNT_unitPercent, .scaling = 0, .enumStrings = nullptr},
 };
 
 static const uint8_t kPerformanceParameters[] = {
@@ -146,6 +155,8 @@ static const uint8_t kPerformanceParameters[] = {
     kParamDriveCharacter,
     kParamMix,
     kParamFeedbackTone,
+    kParamBipolarPitch,
+    kParamBipolarStretch,
 };
 
 static const uint8_t kSourceParameters[] = {
@@ -191,6 +202,8 @@ struct Algorithm : public _NT_algorithm {
     float* scratchRight;
     float* sampleLeft;
     float* sampleRight;
+    float* inputTransientCv;
+    float* outputTransientCv;
     SampleStreamSpec streamedSample;
     SampleStreamSpec pendingSample;
     uint32_t streamSourceFrame;
@@ -247,7 +260,7 @@ void calculateRequirements(_NT_algorithmRequirements& requirements,
                         3U * (alignof(float) - 1U) +
                         2U * NT_globals.streamBufferSizeBytes +
                         2U * NT_globals.maxFramesPerStep * sizeof(_NT_frame) +
-                        4U * NT_globals.maxFramesPerStep * sizeof(float);
+                        6U * NT_globals.maxFramesPerStep * sizeof(float);
     requirements.dtc = 2U * (alignof(uint32_t) - 1U +
                              NT_globals.streamSizeBytes);
     requirements.itc = 0;
@@ -304,6 +317,8 @@ _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& memory,
     algorithm->scratchRight = algorithm->scratchLeft + NT_globals.maxFramesPerStep;
     algorithm->sampleLeft = algorithm->scratchRight + NT_globals.maxFramesPerStep;
     algorithm->sampleRight = algorithm->sampleLeft + NT_globals.maxFramesPerStep;
+    algorithm->inputTransientCv = algorithm->sampleRight + NT_globals.maxFramesPerStep;
+    algorithm->outputTransientCv = algorithm->inputTransientCv + NT_globals.maxFramesPerStep;
     uint8_t* dtcCursor = alignPointer(memory.dtc, alignof(uint32_t));
     algorithm->stream = dtcCursor;
     dtcCursor += NT_globals.streamSizeBytes;
@@ -388,6 +403,7 @@ float exponentialSweep(float minimum, float maximum, int32_t value) {
 }
 
 void applyProcessingControls(Algorithm* algorithm) {
+    bool ratesChanged = false;
     for (std::size_t i = 0; i < ARRAY_SIZE(kPerformanceParameters); ++i) {
         const int parameter = kPerformanceParameters[i];
         if (algorithm->processingControlsApplied &&
@@ -396,12 +412,10 @@ void applyProcessingControls(Algorithm* algorithm) {
         }
         switch (parameter) {
             case kParamPitch:
-                algorithm->processor->setPitchSemitones(
-                    static_cast<float>(algorithm->v[parameter]) * 0.1f);
-                break;
             case kParamStretch:
-                algorithm->processor->setStretch(
-                    stretchValue(algorithm->v[parameter]));
+            case kParamBipolarPitch:
+            case kParamBipolarStretch:
+                ratesChanged = true;
                 break;
             case kParamThreshold:
                 algorithm->processor->setTransientThreshold(
@@ -450,6 +464,15 @@ void applyProcessingControls(Algorithm* algorithm) {
         }
         algorithm->appliedControls[i] =
             algorithm->v[parameter];
+    }
+    if (ratesChanged) {
+        const float pitch = std::exp2(
+            static_cast<float>(algorithm->v[kParamPitch]) * 0.1f / 12.0f);
+        algorithm->processor->setPitchRate(capicola_nt::bipolarRate(
+            pitch, algorithm->v[kParamBipolarPitch], 2.0f));
+        algorithm->processor->setStretch(capicola_nt::bipolarRate(
+            stretchValue(algorithm->v[kParamStretch]),
+            algorithm->v[kParamBipolarStretch], 1.0f));
     }
     algorithm->processingControlsApplied = true;
 }
@@ -863,6 +886,8 @@ void parameterChanged(_NT_algorithm* base, int parameter) {
             break;
         case kParamPitch:
         case kParamStretch:
+        case kParamBipolarPitch:
+        case kParamBipolarStretch:
         case kParamThreshold:
         case kParamGrainSize:
         case kParamQuality:
@@ -999,6 +1024,13 @@ void writeAnalysisCv(float* busFrames,
     for (int i = 0; i < frames; ++i) {
         destination[i] = voltage;
     }
+}
+
+void writeTransientCv(float* busFrames, int frames, int selectedBus,
+                      const float* voltage) {
+    if (selectedBus < 1 || selectedBus > kNT_lastBus) return;
+    std::memcpy(busFrames + (selectedBus - 1) * frames, voltage,
+                static_cast<std::size_t>(frames) * sizeof(float));
 }
 
 uint32_t renderStreamedSample(Algorithm* algorithm,
@@ -1144,6 +1176,7 @@ bool processSampleSegment(Algorithm* algorithm,
     const uint32_t count = renderStreamedSample(
         algorithm, offset, frames, restartedThisBlock);
     if (count == 0U || algorithm->processorFaulted) {
+        algorithm->processor->advanceSilent(static_cast<std::size_t>(frames));
         std::memset(algorithm->scratchLeft + offset, 0,
                     static_cast<std::size_t>(frames) * sizeof(float));
         std::memset(algorithm->scratchRight + offset, 0,
@@ -1158,10 +1191,22 @@ bool processSampleSegment(Algorithm* algorithm,
                                   algorithm->sampleRight + offset,
                                   algorithm->scratchLeft + offset,
                                   algorithm->scratchRight + offset,
-                                  static_cast<std::size_t>(frames));
+                                  static_cast<std::size_t>(count),
+                                  algorithm->inputTransientCv + offset,
+                                  algorithm->outputTransientCv + offset);
+    // Missing stream frames cannot produce musical events or replay stale CV.
+    // Age pulse timers by host time while leaving the missing audio silent.
+    if (count < static_cast<uint32_t>(frames)) {
+        const std::size_t missing = static_cast<std::size_t>(frames) - count;
+        algorithm->processor->advanceSilent(missing);
+        std::memset(algorithm->scratchLeft + offset + count, 0, missing * sizeof(float));
+        std::memset(algorithm->scratchRight + offset + count, 0, missing * sizeof(float));
+    }
     if (!outputsAreFinite(algorithm->scratchLeft + offset,
                           algorithm->scratchRight + offset, frames)) {
         algorithm->processorFaulted = true;
+        std::memset(algorithm->inputTransientCv + offset, 0, frames * sizeof(float));
+        std::memset(algorithm->outputTransientCv + offset, 0, frames * sizeof(float));
         return false;
     }
     return true;
@@ -1253,6 +1298,8 @@ void step(_NT_algorithm* base, float* busFrames, int numFramesBy4) {
     if (frames <= 0 || static_cast<uint32_t>(frames) > NT_globals.maxFramesPerStep) {
         return;
     }
+    std::memset(algorithm->inputTransientCv, 0, frames * sizeof(float));
+    std::memset(algorithm->outputTransientCv, 0, frames * sizeof(float));
     selectSource(algorithm,
                  algorithm->v[kParamSource] == kSourceSample
                      ? kSourceSample : kSourceLive);
@@ -1317,12 +1364,18 @@ void step(_NT_algorithm* base, float* busFrames, int numFramesBy4) {
                                       right,
                                       algorithm->scratchLeft,
                                       algorithm->scratchRight,
-                                      static_cast<std::size_t>(frames));
+                                      static_cast<std::size_t>(frames),
+                                      algorithm->inputTransientCv,
+                                      algorithm->outputTransientCv);
         rendered = outputsAreFinite(algorithm->scratchLeft,
                                     algorithm->scratchRight, frames);
         if (!rendered) {
             algorithm->processorFaulted = true;
+            std::memset(algorithm->inputTransientCv, 0, frames * sizeof(float));
+            std::memset(algorithm->outputTransientCv, 0, frames * sizeof(float));
         }
+    } else if (!sampleBlockProcessed) {
+        algorithm->processor->advanceSilent(static_cast<std::size_t>(frames));
     }
     if (stoppedSampleFadingOut) {
         renderStoppedSampleFadeOut(algorithm, frames);
@@ -1374,14 +1427,12 @@ void step(_NT_algorithm* base, float* busFrames, int numFramesBy4) {
     const bool analysisValid = rendered &&
         std::isfinite(algorithm->processor->inputEnvelope()) &&
         std::isfinite(algorithm->processor->outputEnvelope());
-    writeAnalysisCv(busFrames, frames,
+    writeTransientCv(busFrames, frames,
                     algorithm->v[kParamInputTransientOutput],
-                    analysisValid && algorithm->processor->inputTransient()
-                        ? 5.0f : 0.0f);
-    writeAnalysisCv(busFrames, frames,
+                    algorithm->inputTransientCv);
+    writeTransientCv(busFrames, frames,
                     algorithm->v[kParamOutputTransientOutput],
-                    analysisValid && algorithm->processor->outputTransient()
-                        ? 5.0f : 0.0f);
+                    algorithm->outputTransientCv);
     writeAnalysisCv(busFrames, frames,
                     algorithm->v[kParamInputEnvelopeOutput],
                     analysisValid
@@ -1497,25 +1548,41 @@ void formatControlValue(const Algorithm* algorithm, int parameter,
                         char* text, std::size_t size) {
     const long value = static_cast<long>(displayedValue(algorithm, parameter));
     if (parameter == kParamPitch) {
+        const int32_t bipolar = displayedValue(algorithm, kParamBipolarPitch);
+        if (bipolar != 0) {
+            const float rate = capicola_nt::bipolarRate(
+                std::exp2(static_cast<float>(value) * 0.1f / 12.0f), bipolar, 2.0f);
+            if (rate == 0.0f) {
+                copyLiteral(text, size, "HOLD");
+            } else {
+                const long hundredths = static_cast<long>(std::fabs(rate) * 100.0f + 0.5f);
+                std::snprintf(text, size, "%c%ld.%02ldx", rate < 0.0f ? '-' : '+',
+                              hundredths / 100L, hundredths % 100L);
+            }
+            return;
+        }
         const long magnitude = value < 0 ? -value : value;
         std::snprintf(text, size, "%c%ld.%ld st",
                       value < 0 ? '-' : '+', magnitude / 10, magnitude % 10);
     } else if (parameter == kParamGrainSize) {
         std::snprintf(text, size, "%ld", value);
     } else if (parameter == kParamStretch) {
-        if (value >= 100) {
+        const float rate = capicola_nt::bipolarRate(stretchValue(value),
+            displayedValue(algorithm, kParamBipolarStretch), 1.0f);
+        if (rate == 0.0f) {
             copyLiteral(text, size, "FREEZE");
         } else {
-            const float factor = 1.0f / stretchValue(value);
+            const float factor = 1.0f / std::fabs(rate);
+            const char* direction = rate < 0.0f ? "-" : "";
             if (factor >= 999.5f) {
-                copyLiteral(text, size, "999x+");
+                std::snprintf(text, size, "%s999x+", direction);
             } else if (factor < 10.0f) {
                 const long tenths = static_cast<long>(factor * 10.0f + 0.5f);
-                std::snprintf(text, size, "%ld.%ldx",
-                              tenths / 10L, tenths % 10L);
+                std::snprintf(text, size, "%s%ld.%ldx",
+                              direction, tenths / 10L, tenths % 10L);
             } else {
-                std::snprintf(text, size, "%ldx",
-                              static_cast<long>(factor + 0.5f));
+                std::snprintf(text, size, "%s%ldx",
+                              direction, static_cast<long>(factor + 0.5f));
             }
         }
     } else {

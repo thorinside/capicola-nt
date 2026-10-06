@@ -22,13 +22,17 @@ verify-audit:
 verify-license:
 	python3 tools/verify_license_release.py
 
-test-upstream:
+test-upstream: $(CAPICOLA_OVERLAY_STAMP)
 	mkdir -p "$(AUDIT_TEST_DIR)"
 	$(CXX) -std=c++17 -O2 -Wall -Wextra -Werror \
 		-Ivendor/capicola/lib \
 		vendor/capicola/tests/host/capicola_tests.cpp \
 		-o "$(AUDIT_TEST_DIR)/capicola_tests"
 	"$(AUDIT_TEST_DIR)/capicola_tests"
+	$(CXX) -std=c++17 -O2 -Wall -Wextra -Werror \
+		$(COMMON_INCLUDES) vendor/capicola/tests/host/capicola_tests.cpp \
+		-o "$(AUDIT_TEST_DIR)/capicola_overlay_tests"
+	"$(AUDIT_TEST_DIR)/capicola_overlay_tests"
 
 test-live: $(CAPICOLA_OVERLAY_STAMP)
 	mkdir -p "$(AUDIT_TEST_DIR)"
@@ -49,6 +53,7 @@ $(CAPICOLA_OVERLAY_STAMP): tools/prepare_capicola_overlay.sh $(CAPICOLA_PATCHES)
 		"$(CAPICOLA_SOURCE_DIR)" "$(CAPICOLA_OVERLAY)" "patches/capicola"
 
 $(PLUGIN): src/capicola_nt.cpp include/capicola_nt/live_path.h \
+		include/capicola_nt/bipolar_mapping.h \
 		include/capicola_nt/int64_to_double.h $(CAPICOLA_OVERLAY_STAMP)
 	mkdir -p "$(@D)"
 	$(ARM_CXX) -std=gnu++17 -mcpu=cortex-m7 -mfpu=fpv5-d16 \

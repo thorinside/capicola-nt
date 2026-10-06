@@ -116,6 +116,7 @@ def main() -> None:
             f"{PREFIX}/docs/LICENSE_AUDIT.md",
             f"{PREFIX}/docs/SOURCE_OFFER.md",
             f"{PREFIX}/include/capicola_nt/int64_to_double.h",
+            f"{PREFIX}/include/capicola_nt/bipolar_mapping.h",
             f"{PREFIX}/patches/capicola/0001-avoid-int64-double-runtime-helper.patch",
             f"{PREFIX}/patches/capicola/0002-make-ring-reset-constant-time.patch",
             f"{PREFIX}/patches/capicola/0003-bound-sparse-window-seeks.patch",

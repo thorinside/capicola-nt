@@ -1,28 +1,36 @@
 # Audited Capicola capability set
 
-This is the controlling capability boundary for the first disting NT release. The machine-readable ledger is [`capability-set.json`](capability-set.json). Future implementation may constrain a listed capability further when measured NT feasibility requires it, but it must not add a processing or sampler capability without a new upstream audit and the review required by the approved Spec.
+The machine-readable ledger is [`capability-set.json`](capability-set.json).
+The original approved discovery Spec remains immutable historical evidence.
+The owner-approved v0.6.0 update audits upstream v1.0.0 and extends the existing
+Pitch and Stretch controls with appended bipolar parameters; it adds no sampler
+transport or modulation matrix.
 
 ## Pinned evidence baseline
 
 | Component | Pinned revision | Meaning |
 |---|---|---|
-| Capicola | `f0fb61cfa7111067b4ec1a642d1b16a0910adb3b` (`main`, no upstream release tag) | Audited DSP, panel labels/ranges, and analysis signals |
+| Capicola | `120b0b843c18bda373d96eb79d49805545f61556` (tag `v1.0.0`) | Audited portable DSP, signed head/grid rates and event API |
 | distingNT_API | tag `v1.16.0`, commit `cd12d876dbe060859828053efab1cbc98c9df251` | Delivery SDK baseline |
 | disting NT firmware | exactly `1.16.0` | Delivery/runtime baseline; no other firmware is implied supported |
 | Plug-in API | `kNT_apiVersion13` | Custom UI, sample streaming, 64-bus constants, and dynamic parameter-page support |
 | Audio rate | 48 kHz | Capicola constants and all Hz/ms conversions in this audit |
 
-Both repositories are Git submodules under `vendor/`; the gitlinks, not branch names, are authoritative. The SDK's `v1.15.0` and `v1.16.0` tags currently point to the same commit, so the exact commit is recorded to remove tag ambiguity. Firmware 1.16.0 still requires later ARM, emulator, and physical-runtime verification before release; this audit does not claim those later acceptance checks.
+Both repositories are Git submodules under `vendor/`; the gitlinks, not branch
+names, are authoritative. The SDK's `v1.15.0` and `v1.16.0` tags point to the same
+commit, so the exact commit removes tag ambiguity. Host and ARM build checks are
+recorded in the release notes; this audit makes no physical-runtime or firmware
+preset-loading claim.
 
 ## First-release processing surface
 
 The included user-facing processing capabilities are:
 
-- **Pitch:** -12 to +12 semitones. The NT control uses 0.1-semitone steps with zero directly selectable; it does not apply the upstream panel's continuous zero-detent snap.
-- **Stretch:** real time to freeze, preserving the upstream `(1-x)^2.5` taper.
+- **Pitch:** legacy -12 to +12 semitones in 0.1-semitone steps; appended Bipolar Pitch extends the signed head rate to -2…+2. Its 0% default preserves the legacy rate, and -50% stops the head.
+- **Stretch:** legacy real time to freeze with the `(1-x)^2.5` taper; appended Bipolar Stretch extends the signed grid rate to -1…+1. Its 0% default preserves the legacy rate, and -50% freezes the grid.
 - **Threshold:** adaptive transient ratio 0–8; the top disables automatic triggers.
 - **Grain Size:** 32–4096 keyframes.
-- **Quality:** analyzer epsilon 0.1 (coarse) to 0.001 (fine).
+- **Quality:** preserves NT's analyzer epsilon 0.1 (coarse) to 0.001 (fine) for old presets. Upstream v1.0 changes its panel coarse endpoint to 0.03; the Analyzer itself is unchanged.
 - **Feedback:** loop gain 0–1.5; above 1 is deliberately unstable and upstream clamps injection to +/-1.
 - **Envelope Smoothing:** normalized cutoff 0.00005–0.125 (about 1.2 Hz–3 kHz at 48 kHz).
 - **Fade:** 10–250 ms; one value remains crossfade, wet latency, and trigger-refractory floor.
@@ -46,6 +54,12 @@ takeover.
 
 Four upstream signals are eligible for optional output assignment: **Input Transient**, **Output Transient**, **Input Envelope**, and **Output Envelope**. Transients are 0/5 V and envelopes are 0–5 V. Each future selector must include and default to `0`/disconnected. The output transient is analysis-only and never splices the engine.
 
+Upstream v1.0 removes `DetectorGate()` and `Gate()`. The adapter uses actual
+accepted natural/manual slices for Input Transient and kept output-follower
+events for Output Transient, producing non-retriggerable 10 ms pulses. Natural
+detectors have a 150 ms holdoff. Startup, direction flips and stereo guard
+requests are not musical trigger events.
+
 This count fits the pinned platform's eight physical output buses, but allocation remains optional and must coexist with the two audio outputs. No bus is claimed by default.
 
 ## Sample-source boundary
@@ -64,7 +78,7 @@ Accordingly, the wrapper boundary is:
 - after first stream progress, permit a loop reopen on a short render at or beyond the reported boundary, or recover an earlier stall after 100 ms of missing host frames; reset the missing-frame count on any progress, reopen, or handoff, and never reopen initial loading before its first progress;
 - bound recovery to one reopen per audio block and leave unavailable frames silent rather than performing unbounded SD work;
 - leave unsupported/unreadable resources to host error behavior; and
-- add no recording, reverse, scrubbing, start/end editing, chopping, polyphony, source mixing, hidden file substitution, loop-point editing, or loop-boundary crossfade.
+- add no recording, reverse SD-file playback, scrubbing, start/end editing, chopping, polyphony, source mixing, hidden file substitution, loop-point editing, or loop-boundary crossfade. Reverse DSP-history processing is supported by the bipolar controls.
 
 The SDK header does not promise that every file with a `.wav` suffix is accepted, so this project does not make that broader claim.
 
@@ -85,4 +99,4 @@ make verify-audit
 make test-upstream
 ```
 
-`verify-audit` checks the approved-Spec digest, submodule gitlinks/working commits, SDK API version, unique capability IDs, source locators, limits, analysis signal count, and the explicit sampler exclusions. `test-upstream` compiles the pinned host DSP tests with strict warnings and runs them outside the repository build tree.
+`verify-audit` checks the approved-Spec digest, submodule gitlinks/working commits, SDK API version, unique capability IDs, source locators, limits, analysis signal count, and the explicit sampler exclusions. `test-upstream` compiles the pinned host DSP tests with strict warnings against both the original headers and all four NT overlays, then runs them outside the repository build tree.

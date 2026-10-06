@@ -4,6 +4,7 @@
 #include <limits>
 
 #include "capicola_nt/int64_to_double.h"
+#include "capicola_nt/bipolar_mapping.h"
 #include "capicola_nt/live_path.h"
 
 namespace {
@@ -27,6 +28,111 @@ public:
         }
     }
 };
+
+void testBipolarMappingPreservesLegacyAndStopsExactly() {
+    struct Fixture { float base; int position; float limit; float expected; };
+    const Fixture fixtures[] = {
+        {0.5f, 0, 2.0f, 0.5f}, {1.0f, 0, 2.0f, 1.0f},
+        {2.0f, 0, 2.0f, 2.0f}, {0.0f, 0, 1.0f, 0.0f},
+        {0.1767767f, 0, 1.0f, 0.1767767f},
+        {1.0f, -100, 2.0f, -2.0f}, {0.5f, -75, 2.0f, -1.0f},
+        {2.0f, -50, 2.0f, 0.0f}, {0.5f, -25, 2.0f, 0.25f},
+        {1.0f, 50, 2.0f, 1.5f}, {0.5f, 100, 2.0f, 2.0f},
+        {0.0f, -100, 1.0f, -1.0f}, {1.0f, -50, 1.0f, 0.0f},
+        {0.5f, -25, 1.0f, 0.25f}, {0.0f, 50, 1.0f, 0.5f},
+        {0.0f, 100, 1.0f, 1.0f},
+    };
+    for (const auto& fixture : fixtures) {
+        CHECK(capicola_nt::bipolarRate(fixture.base, fixture.position,
+                                      fixture.limit) == fixture.expected);
+    }
+    for (int pitch = -120; pitch <= 120; ++pitch) {
+        const float legacy = std::exp2(static_cast<float>(pitch) * 0.1f / 12.0f);
+        CHECK(capicola_nt::bipolarRate(legacy, 0, 2.0f) == legacy);
+    }
+    for (int stretch = 0; stretch <= 100; ++stretch) {
+        const float legacy = std::pow(1.0f - stretch * 0.01f, 2.5f);
+        CHECK(capicola_nt::bipolarRate(legacy, 0, 1.0f) == legacy);
+    }
+}
+
+void testTransientPulseDoesNotRetriggerOrPause() {
+    capicola_nt::TransientPulse pulse;
+    CHECK(pulse.tick() == 0.0f);
+    pulse.fire();
+    for (int i = 0; i < 480; ++i) {
+        if (i == 64 || i == 479) pulse.fire();
+        CHECK(pulse.tick() == 5.0f);
+    }
+    CHECK(pulse.tick() == 0.0f);
+    pulse.fire();
+    CHECK(pulse.tick() == 5.0f);
+    pulse.advanceSilent(478);
+    CHECK(pulse.tick() == 5.0f);
+    CHECK(pulse.tick() == 0.0f);
+    pulse.fire();
+    pulse.advanceSilent(500);
+    CHECK(pulse.tick() == 0.0f);
+    pulse.fire();
+    pulse.reset();
+    CHECK(pulse.tick() == 0.0f);
+}
+
+void testManualSlicePulseAcrossBlocksAndColdReset() {
+    static capicola_nt::CapicolaStereoLivePath<4096> path;
+    path.init();
+    path.setTransientThreshold(1.0e9f);
+    float input[64] = {}, left[64], right[64], inCv[64], outCv[64];
+    path.triggerSlice(); // No valid history yet: neither slice nor pulse.
+    path.process(input, nullptr, left, right, 64, inCv, outCv);
+    for (int i = 0; i < 64; ++i) CHECK(inCv[i] == 0.0f);
+    path.triggerSlice();
+    for (int block = 0; block < 9; ++block) {
+        if (block == 2) path.triggerSlice(); // Must not extend the pulse.
+        path.process(input, nullptr, left, right, 64, inCv, outCv);
+        for (int i = 0; i < 64; ++i) {
+            CHECK(inCv[i] == (block * 64 + i < 480 ? 5.0f : 0.0f));
+            CHECK(outCv[i] == 0.0f);
+        }
+    }
+    path.triggerSlice();
+    path.process(input, nullptr, left, right, 64); // Disconnected still ages.
+    path.advanceSilent(480);
+    path.process(input, nullptr, left, right, 64, inCv, outCv);
+    for (int i = 0; i < 64; ++i) CHECK(inCv[i] == 0.0f);
+    path.triggerSlice();
+    path.process(input, nullptr, left, right, 64);
+    path.init();
+    path.process(input, nullptr, left, right, 64, inCv, outCv);
+    for (int i = 0; i < 64; ++i) CHECK(inCv[i] == 0.0f);
+}
+
+void testOutputFollowerPulseKeepsSampleTiming() {
+    static capicola_nt::CapicolaStereoLivePath<4096> path;
+    path.init();
+    path.setMix(0.0f);
+    path.setTransientThreshold(0.5f);
+    capicola::Detector reference;
+    reference.Init();
+    reference.SetThreshold(0.5f);
+    float input[64], left[64], right[64], outCv[64];
+    int remaining = 0, events = 0;
+    for (int block = 0; block < 500; ++block) {
+        for (int i = 0; i < 64; ++i) {
+            input[i] = (block * 64 + i) % 2400 == 0 ? 0.8f : 0.0f;
+        }
+        path.process(input, nullptr, left, right, 64, nullptr, outCv);
+        for (int i = 0; i < 64; ++i) {
+            if (reference.Analyze(input[i] * 2.0f) && remaining == 0) {
+                remaining = 480;
+                ++events;
+            }
+            CHECK(outCv[i] == (remaining > 0 ? 5.0f : 0.0f));
+            if (remaining > 0) --remaining;
+        }
+    }
+    CHECK(events >= 3);
+}
 
 void testInt64ToDoubleConversion() {
     const std::int64_t values[] = {
@@ -323,6 +429,10 @@ void testFarSparseWindowSeekUsesBoundedFallback() {
 } // namespace
 
 int main() {
+    testBipolarMappingPreservesLegacyAndStopsExactly();
+    testTransientPulseDoesNotRetriggerOrPause();
+    testManualSlicePulseAcrossBlocksAndColdReset();
+    testOutputFollowerPulseKeepsSampleTiming();
     testInt64ToDoubleConversion();
     testStereoCorrespondence();
     testLeftNormalizationAndRightRestore();

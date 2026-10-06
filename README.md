@@ -9,7 +9,7 @@ This is an independently maintained disting NT wrapper around
 [Capicola by Heavylight Industries](https://github.com/heavylight-industries/capicola),
 not an official Heavylight Industries release.
 
-- **Current release:** [v0.5.3](https://github.com/thorinside/capicola-nt/releases/tag/v0.5.3)
+- **Current release:** [v0.6.0](https://github.com/thorinside/capicola-nt/releases/tag/v0.6.0)
 - **Supported baseline:** disting NT firmware 1.16.0, plug-in API v13
 - **Plug-in GUID:** `ThCa`
 
@@ -161,7 +161,8 @@ parameter-definition changes; its only SD operation is the NT's bounded stream
 renderer and at most one reopen per audio block for looping or stalled-stream
 recovery.
 
-Capicola does not add reverse playback, scrubbing, regions, chopping,
+The SD-file player streams forward. Capicola can reverse the captured DSP
+history with the bipolar controls; it adds no file scrubbing, regions, chopping,
 polyphony, recording, or live/sample mixing.
 
 ## Controls
@@ -184,7 +185,25 @@ continuous controls are on the NT **Performance** parameter page.
 | Drive Character | 0–100% | 100% | 0% Quake, 50% Clean, 100% Sinc |
 | Mix | 0–100% | 100% | Dry to wet |
 | Feedback Tone | 0–100% | 37.69% | Moves the feedback band-pass centre from low to high |
+| Bipolar Pitch | -100–100% | 0% | Extends the legacy Pitch rate through stop to reverse |
+| Bipolar Stretch | -100–100% | 0% | Extends the legacy Stretch grid rate through freeze to reverse |
 | Slice | Right encoder press | — | Forces a manual splice |
+
+The bipolar controls are at the end of the **Performance** parameter page and
+use ordinary NT parameter mapping. At **0%**, each preserves its corresponding
+Pitch or Stretch setting. **-50%** stops the pitch head or freezes the stretch
+grid. Below -50% it reverses, reaching -2× pitch or -1× stretch at -100%; +100%
+reaches +2× pitch or +1× stretch. Pitch stop holds the head, while Stretch freeze
+holds the grid and lets the grains continue. Set Threshold to 100% to prevent
+automatic transient catches while exploring slow or reverse history.
+
+The performance screen shows a negative stretch factor for reverse and
+`FREEZE` for a stopped grid. When Bipolar Pitch is active, it shows the signed
+head rate or `HOLD`; centered Bipolar Pitch retains the semitone display.
+
+The original 26 parameter definitions and page entries retain their positions.
+The two appended controls default to center, so a restored legacy value vector
+with the new defaults keeps its Pitch and Stretch rates.
 
 Feedback above 100% can grow rapidly and become loud. Reduce Feedback and your
 monitoring level before experimenting in that range.
@@ -226,14 +245,19 @@ The **Routing** page also provides four optional analysis outputs. All are
 
 | Output selector | Signal |
 | --- | --- |
-| Input Transient output | 0 V or 5 V transient gate |
-| Output Transient output | 0 V or 5 V transient gate |
+| Input Transient output | 10 ms, 5 V pulse for an accepted automatic or manual Slice |
+| Output Transient output | 10 ms, 5 V pulse for a kept post-mix transient |
 | Input Envelope output | 0–5 V envelope |
 | Output Envelope output | 0–5 V envelope |
 
 Assign each signal to an unused bus, or select `None` to disconnect it. Analysis
 outputs replace their selected bus, so do not assign two analysis signals—or an
 analysis signal and an audio output—to the same bus.
+
+Transient pulses do not extend when another event arrives while they are high.
+Upstream v1.0 keeps natural detector events at least 150 ms apart; Fade can
+further limit automatic slices. Startup, direction changes and stereo catch-up
+do not create extra Input Transient pulses.
 
 ## Troubleshooting
 
