@@ -103,8 +103,8 @@ static const _NT_parameter kParameterTemplate[] = {
      .unit = kNT_unitHasStrings, .scaling = 0, .enumStrings = nullptr},
     {.name = "Sample", .min = 0, .max = 0, .def = 0,
      .unit = kNT_unitConfirm, .scaling = 0, .enumStrings = nullptr},
-    {.name = "Pitch", .min = -10000, .max = 10000, .def = 0,
-     .unit = kNT_unitPercent, .scaling = kNT_scaling100, .enumStrings = nullptr},
+    {.name = "Pitch", .min = -10000, .max = 10000, .def = 5000,
+     .unit = kNT_unitHasStrings, .scaling = kNT_scaling100, .enumStrings = nullptr},
     {.name = "Stretch", .min = -10000, .max = 10000, .def = 0,
      .unit = kNT_unitPercent, .scaling = kNT_scaling100, .enumStrings = nullptr},
     {.name = "Threshold", .min = 0, .max = 100, .def = 22,
@@ -290,9 +290,10 @@ _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& memory,
     Algorithm* algorithm = new (alignPointer(memory.sram, alignof(Algorithm)))
         Algorithm();
     std::memcpy(algorithm->params, kParameterTemplate, sizeof(kParameterTemplate));
-    // Untagged instances start in the old number range. Its Stretch midpoint
-    // maps to the intended new center; first-step initialization restores the
-    // public default to zero before the plugin operates.
+    // Untagged instances start in the old number range, including saves before
+    // operation. Pitch 60 converts to native unity; Stretch 50 to Freeze.
+    // First-step initialization restores both native defaults before DSP runs.
+    algorithm->params[kParamPitch].def = 60;
     algorithm->params[kParamStretch].def = 50;
     algorithm->parameters = algorithm->params;
     algorithm->parameterPages = &kParameterPages;
@@ -390,6 +391,7 @@ bool presetBaseValues(Algorithm* algorithm, int& pitch, int& stretch) {
 
 bool updatePresetFormat(Algorithm* algorithm) {
     if (algorithm->presetFormatVersion == capicola_nt::kPresetFormatVersion &&
+        algorithm->params[kParamPitch].def == 5000 &&
         algorithm->params[kParamStretch].def == 0) return true;
     const int32_t index = NT_algorithmIndex(algorithm);
     if (index < 0) return false;
@@ -405,7 +407,9 @@ bool updatePresetFormat(Algorithm* algorithm) {
         NT_setParameterFromAudio(static_cast<uint32_t>(index), offset + kParamStretch,
             static_cast<int16_t>(capicola_nt::stretchValueFromLegacy(stretch)));
     }
+    algorithm->params[kParamPitch].def = 5000;
     algorithm->params[kParamStretch].def = 0;
+    NT_updateParameterDefinition(static_cast<uint32_t>(index), offset + kParamPitch);
     NT_updateParameterDefinition(static_cast<uint32_t>(index), offset + kParamStretch);
     algorithm->processingControlsApplied = false;
     return true;
@@ -924,7 +928,34 @@ void parameterChanged(_NT_algorithm* base, int parameter) {
     }
 }
 
+template <std::size_t N>
+void copyLiteral(char* destination, std::size_t size, const char (&source)[N]) {
+    if (size == 0) return;
+    const std::size_t count = N < size ? N : size;
+    std::memcpy(destination, source, count);
+    if (count == size) destination[size - 1U] = '\0';
+}
+
+int formatPitchValue(int value, char* text, std::size_t size) {
+    if (size == 0U) return 0;
+    const float rate = capicola_nt::bipolarPitchRate(value);
+    if (rate == 0.0f) {
+        copyLiteral(text, size, "HOLD");
+    } else {
+        // raw * 0.0002 expressed in hundredths: round raw / 50 exactly,
+        // nearest 0.01x with ties away from zero (no floating-point tie drift).
+        const int raw = capicola_nt::clampControl(value, -10000, 10000);
+        const int hundredths = ((raw < 0 ? -raw : raw) + 25) / 50;
+        std::snprintf(text, size, "%c%d.%02dx", rate < 0.0f ? '-' : '+',
+                      hundredths / 100, hundredths % 100);
+    }
+    return static_cast<int>(std::strlen(text));
+}
+
 int parameterString(_NT_algorithm* base, int parameter, int value, char* buffer) {
+    if (parameter == kParamPitch) {
+        return formatPitchValue(value, buffer, kNT_parameterStringSize);
+    }
     Algorithm* algorithm = static_cast<Algorithm*>(base);
     const char* name = nullptr;
     if (!NT_isSdCardMounted()) {
@@ -1482,14 +1513,6 @@ void drawSelection(Algorithm* algorithm) {
                 10);
 }
 
-template <std::size_t N>
-void copyLiteral(char* destination, std::size_t size, const char (&source)[N]) {
-    if (size == 0) return;
-    const std::size_t count = N < size ? N : size;
-    std::memcpy(destination, source, count);
-    if (count == size) destination[size - 1U] = '\0';
-}
-
 void compactSampleName(const char* filename, char* destination,
                        std::size_t size) {
     constexpr std::size_t kVisibleCharacters = 32U;
@@ -1568,14 +1591,7 @@ void formatControlValue(const Algorithm* algorithm, int parameter,
                         char* text, std::size_t size) {
     const long value = static_cast<long>(displayedValue(algorithm, parameter));
     if (parameter == kParamPitch) {
-        const float rate = capicola_nt::bipolarPitchRate(value);
-        if (rate == 0.0f) {
-            copyLiteral(text, size, "HOLD");
-        } else {
-            const long hundredths = static_cast<long>(std::fabs(rate) * 100.0f + 0.5f);
-            std::snprintf(text, size, "%c%ld.%02ldx", rate < 0.0f ? '-' : '+',
-                          hundredths / 100L, hundredths % 100L);
-        }
+        formatPitchValue(static_cast<int>(value), text, size);
     } else if (parameter == kParamGrainSize) {
         std::snprintf(text, size, "%ld", value);
     } else if (parameter == kParamStretch) {

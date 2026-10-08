@@ -69,7 +69,8 @@ These secondary controls use the audited upstream sweep equations, are shared by
 ## Processing and routing
 
 Pitch and Stretch reuse their original Performance page positions and NT
-mapping. Both default to 0%: the pitch head holds and the stretch grid freezes.
+mapping. Fresh Pitch defaults to +50% / unity; Stretch remains at 0% / Freeze.
+Pitch at 0% holds the pitch head. Both Pitch displays show signed multipliers.
 Negative values reverse the captured history; -100% reaches -2× pitch or -1×
 stretch, while +100% reaches the forward limit. Forward unity is Pitch +50%,
 Stretch +100%. The persistent UI retains its pot banks and shows direction,

@@ -3,8 +3,9 @@
 The machine-readable ledger is [`capability-set.json`](capability-set.json).
 The original approved discovery Spec remains immutable historical evidence.
 The owner-approved v0.6.1 update retains the upstream v1.0.0 audit and reuses the
-original Pitch and Stretch slots for bipolar controls with center defaults and
-one-time preset range conversion.
+original Pitch and Stretch slots for bipolar controls and one-time preset range
+conversion. The default/display correction sets fresh Pitch to +50% / unity;
+Stretch remains centered at Freeze.
 
 ## Pinned evidence baseline
 
@@ -26,7 +27,7 @@ preset-loading claim.
 
 The included user-facing processing capabilities are:
 
-- **Pitch:** original slot 9 now ranges from -100…+100%, with signed head rate -2…+2 and center default 0% / Hold. Old saved values receive a one-time affine range conversion.
+- **Pitch:** original slot 9 now ranges from -100…+100%, with signed head rate -2…+2 and fresh default +50% / unity. Zero remains Hold; performance and host strings show signed multipliers. Old saved values receive a one-time affine range conversion.
 - **Stretch:** original slot 10 now ranges from -100…+100%, with signed grid rate -1…+1, `sign(x) * abs(x)^2.5` taper and center default 0% / Freeze. Old saved values receive a one-time affine range conversion.
 - **Threshold:** adaptive transient ratio 0–8; the top disables automatic triggers.
 - **Grain Size:** 32–4096 keyframes.
