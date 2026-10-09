@@ -173,7 +173,7 @@ continuous controls are on the NT **Performance** parameter page.
 | Control | Range/action | Default | What it does |
 | --- | ---: | ---: | --- |
 | Input Gain | -60–0 dB | 0 dB | Attenuates Live or Sample before the engine; it also affects the dry path |
-| Pitch | -100–100% | 0% / Hold | Sets a signed pitch-head rate from -2× to +2× |
+| Pitch | -100–100% | +50% / 1.00× | Sets a signed pitch-head rate from -2× to +2× |
 | Stretch | -100–100% | 0% / Freeze | Sets a signed stretch-grid rate from -1× to +1× |
 | Threshold | 0–100% | 22% | Sets the automatic transient threshold; 100% disables automatic triggers |
 | Grain Size | 32–4096 | 128 | Sets the analysis grain length in keyframes |
@@ -188,12 +188,14 @@ continuous controls are on the NT **Performance** parameter page.
 | Slice | Right encoder press | — | Forces a manual splice |
 
 Pitch and Stretch use their original positions on the **Performance** page
-and ordinary NT parameter mapping. Their **0%** defaults stop the pitch head
-and freeze the stretch grid. Negative values reverse the captured history;
-positive values move it forward. For forward unity, set **Pitch to +50%** and
-**Stretch to +100%**. The performance screen shows the signed pitch rate or
-`HOLD`, and the stretch time factor or `FREEZE`. Stretch freeze holds the grid
-while grains continue. Set Threshold to 100% to prevent automatic transient
+and ordinary NT parameter mapping. Fresh **Pitch** defaults to **+50% / 1.00×**;
+**Stretch** still defaults to **0% / Freeze**. Pitch at 0% holds the pitch head.
+Negative values reverse the captured history; positive values move it forward.
+For forward unity in both controls, set **Stretch to +100%**. The performance
+and host Pitch displays show the signed rate to the nearest 0.01× (ties away
+from zero); only exact zero reads `HOLD`. Small nonzero rates can read `+0.00x`
+or `-0.00x` without stopping. Stretch shows its time factor or `FREEZE`; Freeze
+holds the grid while grains continue. Set Threshold to 100% to prevent automatic transient
 catches while exploring slow or reverse history.
 
 Unversioned presets use a one-time linear range conversion: old Pitch

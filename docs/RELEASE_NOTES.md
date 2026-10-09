@@ -4,7 +4,8 @@
 
 Simplifies the upstream v1.0 controls by reusing **Pitch** and **Stretch** in
 their original parameter slots 9 and 10. Both now range from -100% to +100%
-with center defaults: Pitch center is **Hold**, Stretch center is **Freeze**.
+with fresh Pitch at +50% / unity and Stretch at 0% / **Freeze**. Pitch center
+remains **Hold**; performance and host Pitch displays show signed multipliers.
 Pitch spans signed rates -2…+2; Stretch spans -1…+1 with the signed magnitude
 taper `sign(x) * abs(x)^2.5`. Forward unity is Pitch +50%, Stretch +100%.
 
@@ -17,8 +18,8 @@ taper `sign(x) * abs(x)^2.5`. Forward unity is Pitch +50%, Stretch +100%.
   0/50/100 becomes reverse/freeze/forward. Converted presets use the new sound
   and CV response.
 - Converts old values once before the first audio block. Fresh instances start
-  at center, and saved format 2 presets and later edits use native bipolar
-  values. Saving before the first audio block also reloads correctly.
+  at unity Pitch and Freeze Stretch; saved format 2 presets and later edits use
+  native bipolar values. Saving before the first audio block also reloads correctly.
 - Retains the upstream v1.0 DSP fixes and event-based transient outputs from
   v0.6.0. v0.6.0 preset compatibility is explicitly outside this update's scope;
   its published tag and assets remain intact.

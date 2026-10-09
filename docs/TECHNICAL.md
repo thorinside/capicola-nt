@@ -104,11 +104,18 @@ to the underlying parameter array so every released parameter index remains
 preset-stable.
 
 Upstream v1.0 supports signed pitch-head and stretch-grid rates. **Pitch** and
-**Stretch** reuse indices 9 and 10, with raw ranges -10000…10000, percentage
-units scaled by 100, and center defaults of 0. Pitch rate is `raw * 0.0002`;
-Stretch rate is `sign(raw) * pow(abs(raw) * 0.0001, 2.5)`. Both clamp to their
-declared range. The custom screen retains its two banks and shows signed pitch
-rates or **HOLD**, and signed stretch time factors or **FREEZE**. Rate changes
+**Stretch** reuse indices 9 and 10, with raw ranges -10000…10000 and scaling
+by 100. Native Pitch defaults to 5000 (+50%, unity); Stretch still defaults to
+0 (Freeze). Pitch uses the SDK's `kNT_unitHasStrings` presentation so the host
+requests its multiplier; numeric values and mapping remain unchanged.
+Pitch rate is `raw * 0.0002`; Stretch rate is
+`sign(raw) * pow(abs(raw) * 0.0001, 2.5)`. Both clamp to their declared range.
+The custom screen retains its two banks and shows signed pitch rates or **HOLD**, and signed stretch time factors or **FREEZE**. Pitch's host
+and performance strings share rounding to the nearest 0.01×, ties away from
+zero, computed exactly as rounded `abs(raw) / 50` hundredths. Only raw zero is
+**HOLD**; smaller nonzero rates retain their sign even when rounded to 0.00×.
+The host callback formats its supplied value before SD/catalogue checks and
+returns the bounded null-terminated string's actual length. Rate changes
 do not reset the warm processor. The file stream still advances forward.
 Quality retains epsilon 0.1–0.001 even though upstream's new panel uses
 0.03–0.001. The other 24 definitions and every pre-v0.6.0 parameter/page index
@@ -139,10 +146,11 @@ processing stays inactive and initialization waits for a valid slot. Subsequent
 blocks and edits use ordinary native parameters. Presets store only the version
 marker; there are no temporary target fields, acknowledgments or migration mode.
 
-Fresh construction uses Pitch 0 and Stretch 50 in the old number range. The
-first valid step converts these to the intended native center values, 0 and 0,
-and restores Stretch's public default to 0. Tagged native loads also restore
-that public default without changing their saved values. Later default resets
+Fresh construction publishes Pitch 60 and Stretch 50 in the old number range.
+The first valid step converts these to native Pitch 5000 (unity) and Stretch 0
+(Freeze), and restores their public defaults to 5000 and 0. Tagged native loads
+also restore these defaults without changing saved values. No value-equality
+heuristic identifies freshness. Later default resets
 and source changes retain format 2. A save before the first step retains version
 1 and the old numbers, so it reloads correctly too.
 

@@ -395,7 +395,7 @@ struct HostPlugin {
         set("Left output mode", 1);
         set("Right output mode", 1);
         // Most source-path tests need unity processing. Tests of actual fresh
-        // defaults explicitly opt out, so the center stop/freeze stays tested.
+        // defaults explicitly opt out to exercise staged unity/Freeze defaults.
         if (unity) {
             if (!useNativeFormat()) std::abort();
             set("Pitch", 5000); set("Stretch", 10000);
@@ -466,9 +466,264 @@ struct HostPlugin {
     }
 };
 
+bool hostPitchString(HostPlugin& plugin, int suppliedValue, const char* expected) {
+    char buffer[kNT_parameterStringSize + 2];
+    std::memset(buffer, '#', sizeof(buffer));
+    plugin.activate();
+    const int length = plugin.factory->parameterString(
+        plugin.algorithm, plugin.parameter("Pitch"), suppliedValue, buffer + 1);
+    return length == static_cast<int>(std::strlen(expected)) &&
+        std::memcmp(buffer + 1, expected, std::strlen(expected) + 1) == 0 &&
+        buffer[0] == '#' && buffer[sizeof(buffer) - 1] == '#';
+}
+
+bool pitchReadout(HostPlugin& plugin, const char* expected) {
+    plugin.activate();
+    gDrawnText.clear();
+    plugin.factory->draw(plugin.algorithm);
+    bool drawn = false;
+    for (const auto& call : gDrawnText) {
+        if (call.x == 0 && call.text == expected) drawn = true;
+    }
+    return drawn && hostPitchString(plugin, plugin.values[plugin.parameter("Pitch")], expected);
+}
+
+void pitchBank(HostPlugin& plugin, float position = 0.75f) {
+    _NT_uiData bank{};
+    bank.controls = kNT_potButtonL;
+    bank.pots[0] = position;
+    plugin.ui(bank);
+}
+
+bool testFreshPitchUnityProcessing() {
+  for (int source : {0, 1}) {
+    HostPlugin fresh(false), unity(false), hold(false), half(false), dry(false);
+    for (HostPlugin* plugin : {&unity, &hold, &half, &dry}) {
+        if (!plugin->useNativeFormat()) return false;
+        plugin->set("Pitch", plugin == &hold ? 0 : plugin == &half ? 2500 : 5000);
+        plugin->set("Stretch", 0);
+    }
+    // Fresh Pitch is never set: start from the factory's actual published values.
+    if (fresh.baseValues[9] != fresh.algorithm->parameters[9].def ||
+        fresh.baseValues[9] != 60 || fresh.baseValues[10] != 50) return false;
+    for (HostPlugin* plugin : {&fresh, &unity, &hold, &half, &dry}) {
+        plugin->set("Right input", 0);
+        plugin->set("Threshold", 100);
+        plugin->set("Drive Character", 5000);
+        if (source == 1) plugin->set("Source", 1);
+        plugin->step();
+    }
+    if (fresh.baseValues[9] != 5000 || fresh.values[9] != 5000 ||
+        fresh.algorithm->parameters[9].def != 5000 || fresh.values[10] != 0 ||
+        fresh.algorithm->parameters[10].def != 0) return false;
+    pitchBank(fresh);
+    if (!pitchReadout(fresh, "+1.00x")) return false;
+    // Stretch remains Freeze by default; only now isolate Pitch observability.
+    for (HostPlugin* plugin : {&fresh, &unity, &hold, &half, &dry})
+        plugin->set("Stretch", 10000);
+    dry.set("Mix", 0);
+    double energy = 0.0, holdDifference = 0.0, halfDifference = 0.0, dryDifference = 0.0;
+    for (int block = 0; block < 600; ++block) {
+        for (int i = 0; i < kFrames; ++i) {
+            const float input = 3.0f * std::sin(
+                2.0f * kPi * 237.0f * (block * kFrames + i) / 48000.0f);
+            for (HostPlugin* plugin : {&fresh, &unity, &hold, &half, &dry})
+                plugin->buses[i] = input;
+        }
+        for (HostPlugin* plugin : {&fresh, &unity, &hold, &half, &dry}) plugin->step();
+        for (int i = 0; i < kFrames; ++i) {
+            if (!std::isfinite(fresh.output(i)) || fresh.output(i) != unity.output(i) ||
+                fresh.output(i, 1) != unity.output(i, 1)) return false;
+            energy += std::fabs(fresh.output(i));
+            holdDifference += std::fabs(fresh.output(i) - hold.output(i));
+            halfDifference += std::fabs(fresh.output(i) - half.output(i));
+            dryDifference += std::fabs(fresh.output(i) - dry.output(i));
+        }
+    }
+    if (energy <= 100.0 || holdDifference <= 100.0 || halfDifference <= 100.0 ||
+        dryDifference <= 100.0 || fresh.baseValues[9] != 5000 ||
+        !pitchReadout(fresh, "+1.00x")) return false;
+  }
+  HostPlugin reset(false); // Separate reset fixture leaves fresh proof untouched.
+  reset.step();
+  reset.set("Pitch", 0);
+  reset.set("Pitch", reset.algorithm->parameters[9].def);
+  reset.step();
+  pitchBank(reset);
+  return reset.baseValues[9] == 5000 && pitchReadout(reset, "+1.00x");
+}
+
+bool testPitchProcessingRatesAndLegacyRounding() {
+    struct Case { bool legacy; int saved, native; const char* text; };
+    const Case cases[] = {
+        {false, -10000, -10000, "-2.00x"}, {false, 0, 0, "HOLD"},
+        {false, 5000, 5000, "+1.00x"}, {false, 10000, 10000, "+2.00x"},
+        {false, 2500, 2500, "+0.50x"},
+        {true, -130, -10000, "-2.00x"}, {true, -119, -9917, "-1.98x"},
+        {true, -35, -2917, "-0.58x"}, {true, -1, -83, "-0.02x"},
+        {true, 0, 0, "HOLD"}, {true, 1, 83, "+0.02x"},
+        {true, 35, 2917, "+0.58x"}, {true, 60, 5000, "+1.00x"},
+        {true, 119, 9917, "+1.98x"}, {true, 130, 10000, "+2.00x"},
+    };
+    for (const auto& test : cases) {
+        HostPlugin plugin(false);
+        if (!test.legacy && !plugin.useNativeFormat()) return false;
+        plugin.set("Pitch", test.saved);
+        plugin.set("Stretch", test.legacy ? 100 : 10000);
+        plugin.set("Right input", 0);
+        plugin.set("Threshold", 100);
+        plugin.set("Grain Size", 32);
+        plugin.set("Quality", 0);
+        plugin.set("Envelope Smoothing", 0);
+        plugin.set("Fade", 0);
+        plugin.set("Drive", 0);
+        plugin.set("Drive Character", 5000);
+        plugin.set("Feedback Tone", 0);
+        auto reference = std::make_unique<capicola_nt::CapicolaStereoLivePath<16384>>();
+        reference->init();
+        // Independently specified native linear rates, not the wrapper helper/default.
+        reference->setPitchRate(test.native * 0.0002f);
+        reference->setStretch(1.0f);
+        reference->setTransientThreshold(1.0e9f);
+        reference->setGrainSize(32);
+        reference->setQuality(0.1f);
+        reference->setFeedback(0.0f);
+        reference->setEnvelopeSmoothing(5.0e-5f);
+        reference->setFade(480.0f);
+        reference->setDrive(0.5f);
+        reference->setDriveCharacter(0.5f);
+        reference->setMix(1.0f);
+        reference->setFeedbackTone(2.0e-3f);
+        float input[kFrames], left[kFrames], right[kFrames];
+        for (int block = 0; block < 320; ++block) {
+            for (int i = 0; i < kFrames; ++i) {
+                input[i] = 0.6f * std::sin(
+                    2.0f * kPi * 237.0f * (block * kFrames + i) / 48000.0f);
+                plugin.buses[i] = input[i] * 5.0f;
+            }
+            reference->process(input, nullptr, left, right, kFrames);
+            plugin.step();
+            for (int i = 0; i < kFrames; ++i) {
+                if (!std::isfinite(plugin.output(i)) ||
+                    std::fabs(plugin.output(i) - left[i] * 5.0f) > 1.0e-5f ||
+                    std::fabs(plugin.output(i, 1) - right[i] * 5.0f) > 1.0e-5f)
+                    return false;
+            }
+        }
+        pitchBank(plugin);
+        if (plugin.baseValues[9] != test.native || !pitchReadout(plugin, test.text))
+            return false;
+    }
+    return true;
+}
+
+bool testPitchStringsRoundAndIgnoreCatalogue() {
+    HostPlugin plugin;
+    pitchBank(plugin);
+    struct Case { int raw; const char* text; };
+    const Case cases[] = {
+        {-10000, "-2.00x"}, {0, "HOLD"}, {5000, "+1.00x"},
+        {10000, "+2.00x"}, {2500, "+0.50x"},
+        {1, "+0.00x"}, {-1, "-0.00x"}, {24, "+0.00x"},
+        {25, "+0.01x"}, {26, "+0.01x"}, {-24, "-0.00x"},
+        {-25, "-0.01x"}, {-26, "-0.01x"}, {74, "+0.01x"},
+        {75, "+0.02x"}, {76, "+0.02x"}, {-75, "-0.02x"},
+        {4974, "+0.99x"}, {4975, "+1.00x"}, {4976, "+1.00x"},
+        {5024, "+1.00x"}, {5025, "+1.01x"}, {5026, "+1.01x"},
+        {-5025, "-1.01x"}, {-12000, "-2.00x"}, {12000, "+2.00x"},
+    };
+    for (const auto& test : cases) {
+        plugin.set("Pitch", test.raw);
+        if (!pitchReadout(plugin, test.text)) return false;
+    }
+    plugin.set("Pitch", -4500); // The callback must format its argument, not v[].
+    for (int availability : {0, 1, 2}) {
+        gCardMounted = availability != 0;
+        gNumFolders = availability == 1 ? 0 : 2;
+        const uint32_t mounts = gCardMountChecks, folders = gFolderInfoCalls,
+                       files = gFileInfoCalls;
+        for (const auto& test : cases) {
+            if (!hostPitchString(plugin, test.raw, test.text)) return false;
+        }
+        if (gCardMountChecks != mounts || gFolderInfoCalls != folders ||
+            gFileInfoCalls != files || plugin.values[9] != -4500) return false;
+    }
+    gCardMounted = true;
+    gNumFolders = 2;
+    return true;
+}
+
+bool testPitchPotFeedbackAndCommitInBothSources() {
+    for (int source : {0, 1}) {
+        HostPlugin plugin;
+        plugin.set("Source", source);
+        plugin.set("Pitch", -5000);
+        plugin.step();
+        pitchBank(plugin, 0.25f);
+        gDeferParameterUiCommit = true;
+        _NT_uiData pot{};
+        pot.controls = kNT_potL;
+        pot.pots[0] = 0.25f; // Pick up the restored reverse value.
+        plugin.ui(pot);
+        pot.pots[0] = 0.625f;
+        plugin.ui(pot);
+        plugin.activate();
+        gDrawnText.clear();
+        plugin.factory->draw(plugin.algorithm);
+        if (plugin.values[9] != -5000 || !drawnTextAt("+0.50x", 0, kNT_textNormal) ||
+            gPendingParameter != 9 || gPendingParameterValue != 2500 ||
+            !hostPitchString(plugin, -5000, "-1.00x")) return false;
+        gDeferParameterUiCommit = false;
+        commitHostParameter(plugin.algorithm, gPendingParameter, gPendingParameterValue);
+        plugin.step();
+        if (plugin.baseValues[9] != 2500 || !pitchReadout(plugin, "+0.50x")) return false;
+    }
+    return true;
+}
+
+bool testDeferredPitchInitialization() {
+    for (bool restored : {false, true}) {
+        HostPlugin plugin(false);
+        if (restored) {
+            plugin.set("Pitch", -35);
+            plugin.set("Stretch", 70);
+            HostJson legacy;
+            if (!plugin.restore(legacy, true)) return false;
+        }
+        const auto savedBases = plugin.baseValues;
+        const uint32_t writes = gAudioParameterWrites, definitions = gParameterDefinitionUpdates;
+        gSlotAvailable = false;
+        plugin.step(); plugin.step();
+        if (plugin.baseValues != savedBases || plugin.save().members[0].value != 1 ||
+            plugin.algorithm->parameters[9].def != 60 ||
+            plugin.algorithm->parameters[10].def != 50 ||
+            gAudioParameterWrites != writes || gParameterDefinitionUpdates != definitions)
+            return false;
+        gSlotAvailable = true;
+        plugin.step();
+        if (plugin.baseValues[9] != (restored ? -2917 : 5000) ||
+            plugin.baseValues[10] != (restored ? 4000 : 0) ||
+            gAudioParameterWrites != writes + 2 || gParameterDefinitionUpdates != definitions + 2)
+            return false;
+        plugin.set("Pitch", 60); // An edit equal to the staged default stays native.
+        plugin.step();
+        if (gAudioParameterWrites != writes + 2 ||
+            gParameterDefinitionUpdates != definitions + 2) return false;
+        plugin.set("Source", 1); plugin.step();
+        plugin.set("Source", 0); plugin.step();
+        // Source callbacks legitimately refresh sample catalogue definitions.
+        if (plugin.baseValues[9] != 60 || plugin.save().members[0].value != 2 ||
+            plugin.algorithm->parameters[9].def != 5000 ||
+            plugin.algorithm->parameters[10].def != 0 || gAudioParameterWrites != writes + 2)
+            return false;
+    }
+    return true;
+}
+
 bool testReleasedParameterAndPagePrefixes() {
     HostPlugin plugin(false);
-    if (plugin.values[9] != 0 || plugin.values[10] != 50 ||
+    if (plugin.values[9] != 60 || plugin.values[10] != 50 ||
+        plugin.algorithm->parameters[9].def != 60 ||
         plugin.algorithm->parameters[10].def != 50) return false;
     plugin.step();
     struct Definition { const char* name; int min, max, def, unit, scaling; };
@@ -482,7 +737,7 @@ bool testReleasedParameterAndPagePrefixes() {
         {"Source", 0, 1, 0, kNT_unitEnum, 0},
         {"Folder", 0, 1, 0, kNT_unitHasStrings, 0},
         {"Sample", 0, 1, 0, kNT_unitConfirm, 0},
-        {"Pitch", -10000, 10000, 0, kNT_unitPercent, kNT_scaling100},
+        {"Pitch", -10000, 10000, 5000, kNT_unitHasStrings, kNT_scaling100},
         {"Stretch", -10000, 10000, 0, kNT_unitPercent, kNT_scaling100},
         {"Threshold", 0, 100, 22, kNT_unitPercent, 0},
         {"Grain Size", 32, 4096, 128, kNT_unitNone, 0},
@@ -500,7 +755,7 @@ bool testReleasedParameterAndPagePrefixes() {
         {"Output Envelope output", 0, 64, 0, kNT_unitCvOutput, 0},
         {"Input Gain", -60, 0, 0, kNT_unitDb, kNT_scalingNone},
     };
-    if (plugin.requirements.numParameters != 26 || plugin.values[9] != 0 ||
+    if (plugin.requirements.numParameters != 26 || plugin.values[9] != 5000 ||
         plugin.values[10] != 0) return false;
     for (int i = 0; i < 26; ++i) {
         const auto& actual = plugin.algorithm->parameters[i];
@@ -593,7 +848,7 @@ bool testPresetFormatRoundTripsAndRejectsMalformedData() {
     // A save before first operation preserves its old-domain initialization.
     if (!fresh.restore(saved, true)) return false;
     fresh.step();
-    if (fresh.baseValues[9] != 0 || fresh.baseValues[10] != 0 ||
+    if (fresh.baseValues[9] != 5000 || fresh.baseValues[10] != 0 ||
         fresh.save().members[0].value != 2) return false;
     for (bool customFirst : {false, true}) {
         HostPlugin legacy(false), reloaded(false);
@@ -671,44 +926,56 @@ bool testDefaultOldFormatAndSaveBeforeFirstStep() {
             const uint32_t writes = gAudioParameterWrites;
             const uint32_t definitions = gParameterDefinitionUpdates;
             reloaded.step();
-            if (reloaded.baseValues[9] != (oldPreset ? 2917 : 0) ||
+            if (reloaded.baseValues[9] != (oldPreset ? 2917 : 5000) ||
                 reloaded.baseValues[10] != (oldPreset ? 4000 : 0) ||
                 reloaded.values != reloaded.baseValues ||
-                reloaded.algorithm->parameters[9].def != 0 ||
+                reloaded.algorithm->parameters[9].def != 5000 ||
                 reloaded.algorithm->parameters[10].def != 0 ||
                 gAudioParameterWrites != writes + (initialized ? 0 : 2) ||
-                gParameterDefinitionUpdates != definitions + 1 ||
+                gParameterDefinitionUpdates != definitions + 2 ||
                 reloaded.save().members[0].value != 2) return false;
             reloaded.step();
             if (gAudioParameterWrites != writes + (initialized ? 0 : 2) ||
-                gParameterDefinitionUpdates != definitions + 1) return false;
+                gParameterDefinitionUpdates != definitions + 2) return false;
         }
       }
     }
     // The tag overrides OLD even when native numbers overlap the old range.
     // Normalizing the public default must not alter any restored native BASE.
-    for (bool customFirst : {false, true}) {
-        HostPlugin tagged(false);
-        HostJson native{true, {{"capicolaFormatVersion", 2}}, ""};
-        if (customFirst && !tagged.restore(native, true)) return false;
-        tagged.set("Pitch", -4500);
-        tagged.set("Stretch", 70);
-        if (!customFirst && !tagged.restore(native)) return false;
-        const uint32_t writes = gAudioParameterWrites;
-        tagged.step();
-        if (tagged.baseValues[9] != -4500 || tagged.baseValues[10] != 70 ||
-            tagged.algorithm->parameters[10].def != 0 ||
-            gAudioParameterWrites != writes) return false;
-        // Source/processor resets preserve the completed format. Default resets
-        // subsequently use native center values and never convert again.
-        tagged.set("Source", 1); tagged.step();
-        tagged.set("Source", 0); tagged.step();
-        tagged.set("Pitch", tagged.algorithm->parameters[9].def);
-        tagged.set("Stretch", tagged.algorithm->parameters[10].def);
-        tagged.step();
-        if (tagged.baseValues[9] != 0 || tagged.baseValues[10] != 0 ||
-            gAudioParameterWrites != writes || tagged.save().members[0].value != 2)
-            return false;
+    for (int pitch : {0, -4500, 2500, 60, 5000}) {
+      for (bool initialized : {false, true}) {
+        HostPlugin savedPlugin(false);
+        if (!savedPlugin.useNativeFormat()) return false;
+        savedPlugin.set("Pitch", pitch);
+        savedPlugin.set("Stretch", 70);
+        if (initialized) savedPlugin.step();
+        HostJson native = savedPlugin.save();
+        if (native.members.size() != 1 || native.members[0].value != 2) return false;
+        for (bool customFirst : {false, true}) {
+            HostPlugin tagged(false);
+            if (customFirst && !tagged.restore(native, true)) return false;
+            if (!tagged.loadParameters(savedPlugin.baseValues)) return false;
+            if (!customFirst && !tagged.restore(native)) return false;
+            const uint32_t writes = gAudioParameterWrites;
+            tagged.step();
+            if (tagged.baseValues[9] != pitch || tagged.baseValues[10] != 70 ||
+                tagged.algorithm->parameters[9].def != 5000 ||
+                tagged.algorithm->parameters[10].def != 0 ||
+                gAudioParameterWrites != writes) return false;
+            // Source resets retain native restored values, including values
+            // equal to either staged or native defaults. No freshness heuristic.
+            tagged.set("Source", 1); tagged.step();
+            tagged.set("Source", 0); tagged.step();
+            if (tagged.baseValues[9] != pitch || tagged.baseValues[10] != 70)
+                return false;
+            tagged.set("Pitch", tagged.algorithm->parameters[9].def);
+            tagged.set("Stretch", tagged.algorithm->parameters[10].def);
+            tagged.step();
+            if (tagged.baseValues[9] != 5000 || tagged.baseValues[10] != 0 ||
+                gAudioParameterWrites != writes || tagged.save().members[0].value != 2)
+                return false;
+        }
+      }
     }
     return true;
 }
@@ -760,13 +1027,19 @@ bool testBipolarMappedValuesApplyWithoutCallbacks() {
                 plugin->set("Drive Character", 5000);
                 plugin->set("Source", source);
             }
+            if (std::strcmp(control, "Pitch") == 0) pitchBank(mapped);
             double difference = 0.0;
-            const int positions[] = {-10000, 0, -2500, 5000, 10000};
+            const int positions[] = {-10000, 0, -2500, 5000, 10000, 2500};
+            const char* pitchStrings[] = {
+                "-2.00x", "HOLD", "-0.50x", "+1.00x", "+2.00x", "+0.50x"};
             for (int block = 0; block < 1600; ++block) {
                 if (block >= 400 && block % 200 == 0) {
-                    const int position = positions[((block - 400) / 200) % 5];
+                    const int index = ((block - 400) / 200) % 6;
+                    const int position = positions[index];
                     notified.set(control, position);
-                    mapped.values[mapped.parameter(control)] = position;
+                    mapped.map(control, position - mapped.baseValues[mapped.parameter(control)]);
+                    if (std::strcmp(control, "Pitch") == 0 &&
+                        !pitchReadout(mapped, pitchStrings[index])) return false;
                 }
                 for (int i = 0; i < kFrames; ++i) {
                     const float input = 3.0f * std::sin(
@@ -979,17 +1252,17 @@ bool testPotBankRequiresPickup() {
     event.pots[0] = 0.001f;
     event.pots[1] = 0.8f;
     plugin.ui(event); // Press jitter must not write ALT Pitch.
-    if (plugin.values[plugin.parameter("Pitch")] != 0) return false;
+    if (plugin.values[plugin.parameter("Pitch")] != 5000) return false;
     event.controls = kNT_potL;
     event.pots[0] = 0.1f;
     plugin.ui(event);
-    if (plugin.values[plugin.parameter("Pitch")] != 0) return false;
-    event.pots[0] = 0.6f; // Cross the saved midpoint in one update.
+    if (plugin.values[plugin.parameter("Pitch")] != 5000) return false;
+    event.pots[0] = 0.8f; // Cross the saved unity target in one update.
     plugin.ui(event);
-    if (plugin.values[plugin.parameter("Pitch")] != 2000) return false;
-    event.pots[0] = 0.7f;
+    if (plugin.values[plugin.parameter("Pitch")] != 6000) return false;
+    event.pots[0] = 0.85f;
     plugin.ui(event);
-    if (plugin.values[plugin.parameter("Pitch")] != 4000) return false;
+    if (plugin.values[plugin.parameter("Pitch")] != 7000) return false;
     event.controls = kNT_potC;
     event.pots[1] = 0.9f; // Other pots remain independently locked.
     plugin.ui(event);
@@ -1358,7 +1631,7 @@ int main() {
         restoredEnergy == 0.0 || restoredValues[source] != 1 ||
         gFolderInfoCalls != folderCallsBeforeRestoredStep ||
         gFileInfoCalls != fileCallsBeforeRestoredStep ||
-        gParameterDefinitionUpdates != definitionUpdatesBeforeRestoredStep + 1 ||
+        gParameterDefinitionUpdates != definitionUpdatesBeforeRestoredStep + 2 ||
         restored->parameters[stretch].def != 0) {
         return fail("preset restore did not load its sample exactly once");
     }
@@ -2445,6 +2718,21 @@ int main() {
         return fail("folder selection is not named through the NT interface");
     }
 
+    if (!testFreshPitchUnityProcessing()) {
+        return fail("actual fresh Pitch defaults did not process at forward unity");
+    }
+    if (!testPitchProcessingRatesAndLegacyRounding()) {
+        return fail("native/legacy Pitch processing disagreed with independently configured rates");
+    }
+    if (!testPitchStringsRoundAndIgnoreCatalogue()) {
+        return fail("Pitch string rounding, supplied value, or no-SD buffer contract failed");
+    }
+    if (!testPitchPotFeedbackAndCommitInBothSources()) {
+        return fail("Pitch pot feedback or host commit failed in Live/Sample");
+    }
+    if (!testDeferredPitchInitialization()) {
+        return fail("Pitch initialization did not defer or converted more than once");
+    }
     if (!testReleasedParameterAndPagePrefixes()) {
         return fail("released parameter metadata/page prefixes changed");
     }
@@ -2455,7 +2743,7 @@ int main() {
         return fail("preset format roundtrip or transactional validation failed");
     }
     if (!testDefaultOldFormatAndSaveBeforeFirstStep()) {
-        return fail("default-old format, fresh center, or pre-operation save/reload failed");
+        return fail("staged defaults, native restoration, or pre-operation save/reload failed");
     }
     if (!testMigrationUsesBaseValuesAndCommonOffset()) {
         return fail("preset initialization changed a mapped base or common offset");
